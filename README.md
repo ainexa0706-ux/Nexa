@@ -1,5 +1,7 @@
 # Nexa
 
+Nexaは、完全オリジナルのAIワークスペースアプリとして企画・設計・実装した自作プロジェクトです。
+
 Nexa is a local-first AI workspace that combines a ChatGPT-style conversation UI with a Codex-style development UI.
 
 It can run with local Ollama models, optionally route to an OpenAI-compatible cloud API, and fall back to local models when cloud routing is unavailable.
