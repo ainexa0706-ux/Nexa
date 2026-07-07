@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nexa 課金プラン</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/auth.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/">
+          <img src="/nexa-mark.svg" alt="" />
+          <span>Nexa 課金プラン</span>
+        </a>
+        <nav>
+          <a href="/">アプリ</a>
+          <a href="/auth">ログイン</a>
+          <a href="/lp.html">LP</a>
+        </nav>
+      </header>
+
+      <main class="hero">
+        <section>
+          <p class="eyebrow">プラン</p>
+          <h1>課金プラン</h1>
+          <p class="lead">
+            Nexaの課金はStripe決済に接続済みです。サーバーの.envにStripeの秘密キー、プラン別Price ID、
+            Webhook署名シークレットを設定すると、有料プランのボタンが有効になります。
+          </p>
+        </section>
+        <section class="card panel-card">
+          <strong>課金状態</strong>
+          <p class="status" id="billingStatus">確認中...</p>
+          <p class="status" id="checkoutHint"></p>
+          <ul class="setup-list" id="setupList"></ul>
+        </section>
+      </main>
+
+      <section class="pricing-grid" id="plans"></section>
+    </div>
+
+    <script type="module" src="/billing.js"></script>
+  </body>
+</html>

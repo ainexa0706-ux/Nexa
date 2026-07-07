@@ -1,0 +1,10 @@
+﻿{
+    "preparedAt":  "2026-07-04T08:42:13.2024356+09:00",
+    "comfyUi":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\ComfyUI",
+    "manager":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\ComfyUI\\custom_nodes\\ComfyUI-Manager",
+    "ltxVideo":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\ComfyUI\\custom_nodes\\ComfyUI-LTXVideo",
+    "workflow":  "",
+    "blueprintReference":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\workflows\\ltx-text-to-video-blueprint.json",
+    "copiedWorkflow":  false,
+    "python":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\ComfyUI\\venv\\Scripts\\python.exe"
+}

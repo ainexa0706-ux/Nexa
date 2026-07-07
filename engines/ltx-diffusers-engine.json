@@ -1,0 +1,9 @@
+﻿{
+    "preparedAt":  "2026-07-04T12:44:49.8063142+09:00",
+    "python":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\ComfyUI\\venv\\Scripts\\python.exe",
+    "cacheDir":  "C:\\Users\\senaa\\OneDrive\\デスクトップ\\AI\\agent-company\\engines\\hf-cache",
+    "model":  "Lightricks/LTX-Video",
+    "downloaded":  false,
+    "verified":  false,
+    "lastSmokeTest":  "failed_native_crash_-1073741819_on_16GB_memory"
+}

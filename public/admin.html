@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nexa Admin</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/auth.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/">
+          <img src="/nexa-mark.svg" alt="" />
+          <span>Nexa Admin</span>
+        </a>
+        <nav>
+          <a href="/">アプリ</a>
+          <a href="/billing">課金</a>
+          <a href="/auth">アカウント</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Owner Console</p>
+          <h1>Nexa Admin</h1>
+          <p class="lead">
+            この画面は所有者アカウントだけが使える管理専用アプリです。ユーザー情報、プラン、BAN状態、課金イベントを管理できます。
+          </p>
+        </div>
+        <div class="card panel-card">
+          <strong>状態</strong>
+          <p class="status" id="adminStatus">読み込み中...</p>
+        </div>
+      </section>
+
+      <section class="grid" id="metrics"></section>
+
+      <section class="account">
+        <div class="card panel-card">
+          <h2>ユーザー管理</h2>
+          <div id="usersList"></div>
+        </div>
+
+        <div class="card panel-card">
+          <h2>課金イベント</h2>
+          <div id="billingList"></div>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/admin.js"></script>
+  </body>
+</html>

@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nexa</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <button class="layout-toggle layout-toggle-left" id="leftSidebarToggle" type="button" aria-label="チャット履歴バーを折りたたむ">
+      <span aria-hidden="true">‹</span>
+    </button>
+    <button class="layout-toggle layout-toggle-right" id="rightSidebarToggle" type="button" aria-label="エージェント状況バーを折りたたむ">
+      <span aria-hidden="true">›</span>
+    </button>
+    <div class="app-frame">
+      <aside class="chat-sidebar" id="chatSidebar" aria-label="プロジェクトメニュー">
+        <div class="window-dots" aria-hidden="true">
+          <span class="dot-red"></span>
+          <span class="dot-yellow"></span>
+          <span class="dot-green"></span>
+        </div>
+
+        <div class="sidebar-scroll">
+          <nav class="sidebar-actions" aria-label="チャット操作">
+            <div class="new-chat-row">
+              <button class="side-action side-action-primary" id="newChatButton" type="button">
+                <span class="side-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /><path d="M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" /></svg>
+                </span>
+                <span>新しいチャット</span>
+              </button>
+              <button class="sidebar-more" type="button" aria-label="サイドバーオプション">
+                <span aria-hidden="true">...</span>
+              </button>
+            </div>
+
+            <label class="side-search">
+              <span class="side-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
+              </span>
+              <input id="projectSearch" type="search" autocomplete="off" placeholder="プロジェクトを検索" />
+              <kbd>⌘K</kbd>
+            </label>
+          </nav>
+
+          <section class="project-section" aria-label="プロジェクト">
+            <div class="section-title-row">
+              <h2>プロジェクト</h2>
+              <span>最近更新順</span>
+            </div>
+            <div class="conversation-list" id="projectList"></div>
+          </section>
+
+          <section class="archive-section" aria-label="アーカイブ">
+            <button class="archive-row" type="button">
+              <span>アーカイブ</span>
+              <strong>12</strong>
+            </button>
+          </section>
+
+          <section class="sidebar-card memory-capsule" id="memoryCapsule" aria-label="メモリーカプセル">
+            <div class="sidebar-card-head">
+              <strong>メモリーカプセル</strong>
+              <span id="memoryCount">0</span>
+            </div>
+            <p id="memoryState">長期記憶を同期中です</p>
+            <div class="memory-meter" aria-hidden="true">
+              <span id="memoryMeter"></span>
+            </div>
+            <small id="memoryUsage">使用量 0MB / 10GB</small>
+          </section>
+
+          <section class="sidebar-card plugin-capsule" id="pluginCapsule" aria-label="MCPとプラグイン">
+            <div class="sidebar-card-head">
+              <strong>MCP / プラグイン</strong>
+              <span id="pluginCount">0 / 0</span>
+            </div>
+            <div class="plugin-icons" aria-hidden="true">
+              <span class="plugin-database"></span>
+              <span class="plugin-web"></span>
+              <span class="plugin-github"></span>
+              <span class="plugin-doc"></span>
+            </div>
+          </section>
+        </div>
+
+        <a class="billing-float-button" href="/billing" aria-label="課金プランを開く">
+          <span aria-hidden="true">¥</span>
+          <strong>課金プラン</strong>
+        </a>
+
+        <div class="sidebar-status" id="sidebarStatus">
+          <span class="ready-dot" aria-hidden="true"></span>
+          <span>準備完了</span>
+          <button type="button" aria-label="設定">⚙</button>
+        </div>
+      </aside>
+
+      <main class="chat-shell">
+        <header class="chat-header">
+          <div class="chat-titlebar">
+            <div class="title-group">
+              <h1>
+                <span id="projectName">Chat</span>
+                <button class="title-chevron" type="button" aria-label="プロジェクト詳細">⌄</button>
+              </h1>
+              <small id="projectGoal">シンプルチャット</small>
+              <small id="projectStats"></small>
+            </div>
+
+            <div class="workspace-lock-strip">
+              <button class="workspace-crumb" id="folderButton" type="button" aria-expanded="false">
+                <span class="workspace-home" aria-hidden="true"></span>
+                <span>workspace /</span>
+                <strong id="workspaceCrumb">未選択</strong>
+              </button>
+              <span class="lock-pill" id="lockStatus">
+                <span aria-hidden="true">🔒</span>
+                ロック中
+              </span>
+            </div>
+
+            <button class="header-icon-button" type="button" aria-label="出力をダウンロード">
+              <span aria-hidden="true">⇩</span>
+            </button>
+          </div>
+
+          <div class="run-toolbar" aria-label="実行設定">
+            <span class="toolbar-chip" id="toolbarModel">
+              <span class="toolbar-dot"></span>
+              モデル: Auto
+            </span>
+            <span class="toolbar-chip" id="toolbarPerformance">
+              <span aria-hidden="true">✦</span>
+              パフォーマンス: 高速
+            </span>
+            <span class="toolbar-chip safety" id="toolbarSafety">
+              <span aria-hidden="true">◈</span>
+              安全性ゲート: 承認なし
+            </span>
+          </div>
+        </header>
+
+        <section class="message-stream" id="messageStream" aria-live="polite"></section>
+
+        <form class="composer" id="composer">
+          <div class="composer-progress" id="composerProgress" hidden></div>
+          <div class="feature-panel" id="featurePanel" hidden></div>
+          <div class="folder-panel" id="folderPanel" hidden></div>
+          <div class="model-menu" id="modelMenu" hidden></div>
+          <input class="file-input" id="fileInput" type="file" multiple />
+          <div class="attachment-tray" id="attachmentTray"></div>
+
+          <div class="task-timeline" id="taskTimeline" aria-label="タスク進行"></div>
+
+          <div class="composer-main">
+            <button class="composer-plus" id="featureButton" type="button" aria-label="添付">
+              <span aria-hidden="true">+</span>
+            </button>
+            <div class="composer-field">
+              <textarea id="promptInput" rows="1" placeholder="AIに指示を入力してください..."></textarea>
+              <div class="composer-tools">
+                <button class="tool-chip folder-chip" id="composerFolderButton" type="button">
+                  <span class="folder-icon" aria-hidden="true">□</span>
+                  <span id="folderLabel">フォルダーを選択</span>
+                </button>
+                <span class="tool-chip model-chip" id="modelLabel">モデル確認中</span>
+                <button class="tool-chip image-tool-chip" id="imageToolButton" type="button">
+                  <span aria-hidden="true">◇</span>
+                  <span>画像生成</span>
+                </button>
+                <span class="tool-chip safety-chip" id="statusLabel">待機中</span>
+              </div>
+              <small class="composer-hint" id="composerHint">Enterで送信 / Shift+Enterで改行</small>
+            </div>
+            <button class="mic-button" type="button" aria-label="音声入力">
+              <span aria-hidden="true">◌</span>
+            </button>
+            <button class="composer-mode-button is-unset" id="composerModeButton" type="button" aria-label="モードを変更" aria-expanded="false">
+              <span id="composerModeLabel">Mode</span>
+              <small id="composerModeValue">Unset</small>
+            </button>
+            <button class="composer-model-button" id="modelMenuButton" type="button" aria-label="モデルを変更" aria-expanded="false">
+              <span id="modelButtonLabel">Auto</span>
+              <i aria-hidden="true"></i>
+            </button>
+            <button class="send-button" id="sendButton" type="submit" aria-label="送信">
+              <span>送信</span>
+            </button>
+          </div>
+        </form>
+      </main>
+
+      <aside class="workspace-panel" id="workspacePanel" aria-label="出力と情報源">
+        <section class="workspace-card output-card">
+          <h2>出力</h2>
+          <div class="workspace-list" id="outputList"></div>
+          <div class="panel-action-row">
+            <button class="panel-action" type="button" data-review-changes>すべての変更を表示</button>
+            <button class="panel-action primary" type="button" data-review-changes>レビューする</button>
+          </div>
+        </section>
+
+        <section class="workspace-card">
+          <h2>情報源</h2>
+          <div class="workspace-list" id="sourceList"></div>
+        </section>
+
+        <section class="workspace-card ai-team-card">
+          <h2>
+            AIチーム
+            <span>ライブ</span>
+          </h2>
+          <div class="workspace-list agent-list" id="agentList"></div>
+          <button class="panel-action" type="button">チームの詳細を開く</button>
+        </section>
+
+        <section class="workspace-card model-card">
+          <h2>モデル性能</h2>
+          <div class="workspace-list" id="modelPerfList"></div>
+        </section>
+
+        <section class="workspace-card intelligence-card">
+          <h2>AI Intelligence</h2>
+          <div class="workspace-list" id="intelligenceList"></div>
+        </section>
+
+        <section class="workspace-card">
+          <h2>長期記憶</h2>
+          <div class="workspace-list" id="memoryList"></div>
+        </section>
+
+        <section class="workspace-card">
+          <h2>継続タスク</h2>
+          <div class="workspace-list" id="taskList"></div>
+        </section>
+
+        <section class="workspace-card">
+          <h2>MCP / プラグイン</h2>
+          <div class="workspace-list" id="toolStatusList"></div>
+        </section>
+
+        <section class="workspace-card">
+          <h2>セーフティ</h2>
+          <div class="workspace-list" id="safetyList"></div>
+        </section>
+      </aside>
+    </div>
+
+    <button class="account-button" id="accountButton" type="button" aria-label="アカウントを開く">
+      <span class="account-avatar" aria-hidden="true">N</span>
+      <span id="accountButtonLabel">ログイン</span>
+    </button>
+
+    <section class="account-modal" id="accountModal" hidden>
+      <button class="account-modal-backdrop" id="accountModalBackdrop" type="button" aria-label="閉じる"></button>
+      <div class="account-dialog" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle">
+        <header class="account-modal-head">
+          <div>
+            <small>Nexaアカウント</small>
+            <h2 id="accountModalTitle">ログイン</h2>
+          </div>
+          <button class="account-close" id="accountModalClose" type="button" aria-label="閉じる">×</button>
+        </header>
+
+        <div class="account-signed-out" id="accountSignedOut">
+          <div class="account-tabs" role="tablist" aria-label="ログイン方法">
+            <button class="account-tab is-active" type="button" data-account-tab="login">ログイン</button>
+            <button class="account-tab" type="button" data-account-tab="register">登録</button>
+          </div>
+          <button class="account-oauth-button" id="googleLoginButton" type="button">
+            <span aria-hidden="true">G</span>
+            <strong>Googleで続ける</strong>
+          </button>
+          <small class="account-oauth-hint" id="googleLoginHint">Googleログインを確認中...</small>
+          <form class="account-form" id="accountForm">
+            <label class="account-field" id="accountNameField">
+              <span>名前</span>
+              <input id="accountNameInput" type="text" autocomplete="name" placeholder="Nexa User" />
+            </label>
+            <label class="account-field">
+              <span>メールアドレス</span>
+              <input id="accountEmailInput" type="email" autocomplete="email" required placeholder="you@example.com" />
+            </label>
+            <label class="account-field">
+              <span>パスワード</span>
+              <input id="accountPasswordInput" type="password" autocomplete="current-password" required minlength="8" placeholder="8文字以上" />
+            </label>
+            <button class="account-primary" id="accountSubmit" type="submit">ログイン</button>
+          </form>
+        </div>
+
+        <div class="account-signed-in" id="accountSignedIn" hidden>
+          <div class="account-profile">
+            <span class="account-avatar account-avatar-large" id="accountUserInitial">N</span>
+            <div>
+              <strong id="accountUserName">Nexa User</strong>
+              <small id="accountUserMeta">free</small>
+            </div>
+          </div>
+
+          <div class="account-grid">
+            <section class="account-mini-card">
+              <span>現在のプラン</span>
+              <strong id="accountPlanLabel">free</strong>
+              <small id="accountBillingLabel">課金状態</small>
+              <button class="account-primary" id="accountCheckoutButton" type="button">課金ページを開く</button>
+            </section>
+          </div>
+
+          <div class="account-actions">
+            <button class="account-secondary" id="accountAdminButton" type="button" hidden>Nexa Adminを開く</button>
+            <button class="account-danger" id="accountLogoutButton" type="button">ログアウト</button>
+          </div>
+        </div>
+
+        <p class="account-status" id="accountStatus" role="status"></p>
+      </div>
+    </section>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

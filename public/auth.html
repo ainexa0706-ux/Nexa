@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nexa ログイン</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/auth.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/">
+          <img src="/nexa-mark.svg" alt="" />
+          <span>Nexa ログイン</span>
+        </a>
+        <nav>
+          <a href="/">アプリ</a>
+          <a href="/billing">課金プラン</a>
+          <a href="/lp.html">LP</a>
+        </nav>
+      </header>
+
+      <main class="hero">
+        <section>
+          <p class="eyebrow">アカウント</p>
+          <h1>Nexaにログイン</h1>
+          <p class="lead">
+            GoogleログインまたはメールアドレスでNexaにログインできます。課金ページと管理者画面はここでログインしたアカウントに連動します。
+          </p>
+          <div class="grid">
+            <div class="card metric"><strong>Google</strong><span>本物のOAuthログイン</span></div>
+            <div class="card metric"><strong>所有者</strong><span>最初のユーザーが管理者</span></div>
+            <div class="card metric"><strong>安全</strong><span>ログアウト後も再ログイン可能</span></div>
+          </div>
+        </section>
+
+        <section class="card auth-card" id="authCard">
+          <div class="tabs">
+            <button class="tab is-active" type="button" data-tab="login">ログイン</button>
+            <button class="tab" type="button" data-tab="register">登録</button>
+          </div>
+          <button class="oauth-button" id="googleLoginButton" type="button">
+            <span aria-hidden="true">G</span>
+            <strong>Googleで続ける</strong>
+          </button>
+          <small class="oauth-hint" id="googleLoginHint">Googleログインを確認中...</small>
+          <form class="form" id="authForm">
+            <label>
+              名前
+              <input id="nameInput" name="name" autocomplete="name" placeholder="名前を入力" />
+            </label>
+            <label>
+              メールアドレス
+              <input id="emailInput" name="email" autocomplete="email" required placeholder="mail@example.com" />
+            </label>
+            <label>
+              パスワード
+              <input id="passwordInput" name="password" type="password" autocomplete="current-password" required minlength="8" />
+            </label>
+            <button class="primary" type="submit" id="authSubmit">ログイン</button>
+            <div class="status" id="authStatus"></div>
+          </form>
+        </section>
+      </main>
+
+      <section class="account hidden" id="accountPanel">
+        <div class="card panel-card">
+          <div class="row">
+            <div>
+              <strong id="userLabel">ログイン中</strong>
+              <small id="planLabel"></small>
+            </div>
+            <button class="secondary" type="button" id="logoutButton">ログアウト</button>
+          </div>
+          <div class="row">
+            <div>
+              <strong>課金</strong>
+              <small>プラン変更は課金ページで行えます。</small>
+            </div>
+            <a class="button" href="/billing">課金ページを開く</a>
+          </div>
+          <div class="row hidden" id="adminLinkRow">
+            <div>
+              <strong>Nexa Admin</strong>
+              <small>所有者専用の管理画面です。</small>
+            </div>
+            <a class="button" href="/admin">管理画面を開く</a>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/auth.js"></script>
+  </body>
+</html>

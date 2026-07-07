@@ -1,0 +1,27 @@
+{
+  "id": "core-tools",
+  "name": "Core Tools",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "id": "ollama.chat",
+      "name": "Ollama Chat",
+      "capability": "model"
+    },
+    {
+      "id": "web.search",
+      "name": "Web Search",
+      "capability": "network"
+    },
+    {
+      "id": "memory.project",
+      "name": "Project Memory",
+      "capability": "storage"
+    },
+    {
+      "id": "code.javascript",
+      "name": "JavaScript Runtime",
+      "capability": "execution"
+    }
+  ]
+}

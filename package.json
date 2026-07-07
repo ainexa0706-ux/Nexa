@@ -1,0 +1,86 @@
+{
+    "name": "nexa",
+    "version": "1.2.3",
+    "description": "Local-first multi-agent AI workspace powered by Ollama.",
+    "type": "module",
+    "main": "electron/main.cjs",
+    "author": "Nexa",
+    "scripts": {
+        "start": "node server.mjs",
+        "dev": "node server.mjs",
+        "app:dev": "electron .",
+        "lint": "node --check server.mjs && node --check electron/main.cjs && node --check public/app.js && node --check public/auth.js && node --check public/admin.js && node --check public/billing.js && node --check scripts/bump-version.mjs",
+        "typecheck": "node --check server.mjs && node --check electron/main.cjs && node --check public/app.js && node --check public/auth.js && node --check public/admin.js && node --check public/billing.js && node --check scripts/bump-version.mjs",
+        "test": "node --check server.mjs && node --check electron/main.cjs && node --check public/app.js && node --check public/auth.js && node --check public/admin.js && node --check public/billing.js && node --check scripts/bump-version.mjs",
+        "build": "node --check server.mjs && node --check electron/main.cjs && node --check public/app.js && node --check public/auth.js && node --check public/admin.js && node --check public/billing.js && node --check scripts/bump-version.mjs",
+        "version:patch": "node scripts/bump-version.mjs",
+        "icons": "node scripts/generate-app-icons.mjs",
+        "pack:win": "electron-builder --win dir",
+        "dist:win": "electron-builder --win nsis"
+    },
+    "engines": {
+        "node": ">=20"
+    },
+    "build": {
+        "appId": "com.nexa.workspace",
+        "productName": "Nexa",
+        "copyright": "Copyright (c) 2026 Nexa",
+        "asar": false,
+        "directories": {
+            "output": "dist",
+            "buildResources": "build"
+        },
+        "files": [
+            "server.mjs",
+            "package.json",
+            ".env.example",
+            "build/**/*",
+            "public/**/*",
+            "electron/**/*",
+            "plugins/**/*",
+            "docs/**/*",
+            "scripts/**/*",
+            "mcp.servers.json"
+        ],
+        "extraResources": [
+            {
+                "from": "engines",
+                "to": "engines",
+                "filter": [
+                    "*.json",
+                    "*.md",
+                    "workflows/**/*"
+                ]
+            }
+        ],
+        "win": {
+            "icon": "build/icon.ico",
+            "target": [
+                {
+                    "target": "nsis",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ],
+            "artifactName": "${productName}-Setup-${version}.${ext}"
+        },
+        "nsis": {
+            "oneClick": false,
+            "perMachine": false,
+            "allowToChangeInstallationDirectory": true,
+            "createDesktopShortcut": true,
+            "createStartMenuShortcut": true,
+            "shortcutName": "Nexa",
+            "installerIcon": "build/icon.ico",
+            "uninstallerIcon": "build/icon.ico"
+        }
+    },
+    "devDependencies": {
+        "electron": "^43.0.0",
+        "electron-builder": "^26.15.3"
+    },
+    "dependencies": {
+        "sharp": "^0.35.3"
+    }
+}

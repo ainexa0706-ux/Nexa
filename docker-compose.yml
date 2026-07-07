@@ -1,0 +1,30 @@
+name: agent-company
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      HOST: 0.0.0.0
+      OLLAMA_URL: http://ollama:11434
+      DATA_DIR: /data
+      WORKSPACE_ROOT: /workspace
+    volumes:
+      - ./data:/data
+      - ./workspace:/workspace
+      - ./plugins:/app/plugins
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  ollama-models:

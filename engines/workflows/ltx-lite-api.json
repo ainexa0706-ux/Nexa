@@ -1,0 +1,117 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "ltxv-2b-0.9.8-distilled-fp8.safetensors"
+    },
+    "_meta": {
+      "title": "LTX 2B FP8 Checkpoint"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": ""
+    },
+    "_meta": {
+      "title": "Positive Prompt"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "text, subtitles, watermark, low quality, blurry, jitter, deformed"
+    },
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "4": {
+    "class_type": "LTXVConditioning",
+    "inputs": {
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "frame_rate": 8
+    },
+    "_meta": {
+      "title": "LTX Frame Rate Conditioning"
+    }
+  },
+  "5": {
+    "class_type": "EmptyLTXVLatentVideo",
+    "inputs": {
+      "width": 256,
+      "height": 256,
+      "length": 17,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Lite Latent Video"
+    }
+  },
+  "6": {
+    "class_type": "ModelSamplingLTXV",
+    "inputs": {
+      "model": ["1", 0],
+      "latent": ["5", 0],
+      "max_shift": 2.05,
+      "base_shift": 0.95
+    },
+    "_meta": {
+      "title": "LTX Model Sampling"
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["6", 0],
+      "positive": ["4", 0],
+      "negative": ["4", 1],
+      "latent_image": ["5", 0],
+      "seed": 42,
+      "steps": 8,
+      "cfg": 3,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1
+    },
+    "_meta": {
+      "title": "Lite LTX Sampler"
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["1", 2]
+    },
+    "_meta": {
+      "title": "Decode Frames"
+    }
+  },
+  "9": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": ["8", 0],
+      "fps": 8,
+      "bit_depth": 8
+    },
+    "_meta": {
+      "title": "Create MP4 Video"
+    }
+  },
+  "10": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": ["9", 0],
+      "filename_prefix": "agent-company/ltx-lite",
+      "format": "mp4",
+      "codec": "h264"
+    },
+    "_meta": {
+      "title": "Save Video"
+    }
+  }
+}
