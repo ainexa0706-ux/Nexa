@@ -376,6 +376,17 @@ button:disabled {
   font-size: 36px;
 }
 
+.credit-pill {
+  width: fit-content;
+  padding: 7px 10px;
+  color: #07100c;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f5f9ff, var(--green));
+  font-size: 12px;
+  font-weight: 850;
+  box-shadow: 0 12px 28px rgba(101, 224, 163, 0.18);
+}
+
 .pricing-card ul {
   margin: 0;
   padding-left: 18px;
@@ -463,6 +474,18 @@ button:disabled {
 
 .user-admin-row select {
   min-width: 150px;
+}
+
+.mini-admin-field {
+  min-width: 94px;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mini-admin-field input {
+  min-height: 36px;
+  padding: 0 10px;
 }
 
 .codebox {

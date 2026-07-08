@@ -16,7 +16,7 @@ npm run dist:win
 The installer is written to:
 
 ```text
-dist/Nexa-Setup-1.0.13.exe
+dist/Nexa-Setup-<version>.exe
 ```
 
 ## Download Endpoint
@@ -72,3 +72,14 @@ Do not publish a build with a private API key embedded in it.
 Image generation is available in the app UI.
 
 Video generation is intentionally disabled in this public build. When users ask for video, Nexa should offer image generation or storyboard alternatives instead of claiming that a video was generated.
+
+## Credits
+
+The public billing build includes monthly credits:
+
+- Free: 100
+- Plus: 1,200
+- Pro: 5,000
+- Studio: 12,000
+
+Chat consumes 1 credit, image generation consumes 3 credits, and the video generation endpoint consumes 10 credits. Nexa Admin can adjust bonus and used credits per user.

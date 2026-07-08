@@ -210,6 +210,9 @@ const el = {
   accountUserMeta: document.querySelector("#accountUserMeta"),
   accountPlanLabel: document.querySelector("#accountPlanLabel"),
   accountBillingLabel: document.querySelector("#accountBillingLabel"),
+  accountCreditsLabel: document.querySelector("#accountCreditsLabel"),
+  accountCreditsMeta: document.querySelector("#accountCreditsMeta"),
+  accountCreditsMeter: document.querySelector("#accountCreditsMeter"),
   accountCheckoutButton: document.querySelector("#accountCheckoutButton"),
   accountCreateKeyButton: document.querySelector("#accountCreateKeyButton"),
   accountNewKey: document.querySelector("#accountNewKey"),
@@ -777,6 +780,34 @@ function accountRoleLabel(role = "user") {
   return role === "admin" ? "管理者" : "ユーザー";
 }
 
+function formatNumber(value) {
+  return new Intl.NumberFormat("ja-JP").format(Number(value || 0));
+}
+
+function renderAccountCredits() {
+  const credits = state.accountBilling?.credits || state.account?.credits || null;
+  if (!el.accountCreditsLabel || !el.accountCreditsMeta || !el.accountCreditsMeter) return;
+  if (!credits) {
+    el.accountCreditsLabel.textContent = "未同期";
+    el.accountCreditsMeta.textContent = "ログインすると残高を同期します";
+    el.accountCreditsMeter.style.width = "0%";
+    return;
+  }
+  if (credits.unlimited) {
+    el.accountCreditsLabel.textContent = "無制限";
+    el.accountCreditsMeta.textContent = `${formatNumber(credits.used)} クレジット使用済み`;
+    el.accountCreditsMeter.style.width = "100%";
+    return;
+  }
+  const total = Math.max(1, Number(credits.total || credits.monthly || 1));
+  const remaining = Math.max(0, Number(credits.remaining || 0));
+  const used = Math.max(0, Number(credits.used || 0));
+  const percent = Math.max(0, Math.min(100, (remaining / total) * 100));
+  el.accountCreditsLabel.textContent = `${formatNumber(remaining)} / ${formatNumber(total)}`;
+  el.accountCreditsMeta.textContent = `${formatNumber(used)} 使用済み / ${credits.month || ""}`;
+  el.accountCreditsMeter.style.width = `${percent}%`;
+}
+
 function setAccountStatus(message = "", isError = false) {
   if (!el.accountStatus) return;
   el.accountStatus.textContent = message;
@@ -851,6 +882,7 @@ function renderAccountModal() {
   if (el.accountUserMeta) el.accountUserMeta.textContent = `${user.email || ""} / ${accountRoleLabel(user.role)}`.trim();
   if (el.accountPlanLabel) el.accountPlanLabel.textContent = `${accountPlanLabel(plan)}${user.subscriptionStatus ? ` / ${user.subscriptionStatus}` : ""}`;
   if (el.accountBillingLabel) el.accountBillingLabel.textContent = "プラン変更は課金ページで行えます。";
+  renderAccountCredits();
   if (el.accountCheckoutButton) el.accountCheckoutButton.disabled = false;
   if (el.accountAdminButton) el.accountAdminButton.hidden = user.role !== "admin";
   renderAccountKeys();
@@ -1537,6 +1569,12 @@ async function runDirectGeneration(kind, prompt, attachments) {
   });
 
   state.activeProject = data.project;
+  if (data.credits) {
+    state.accountBilling ||= {};
+    state.accountBilling.credits = data.credits;
+    if (state.account) state.account.credits = data.credits;
+    renderAccountModal();
+  }
   const summary = data.summary || data.project;
   const projectIndex = state.projects.findIndex((project) => project.id === summary.id);
   if (projectIndex >= 0) state.projects[projectIndex] = summary;
@@ -2373,6 +2411,12 @@ async function sendPrompt() {
         state.system = payload;
         if (el.modelLabel) el.modelLabel.textContent = modelScoreLabel(state.modelChoice || "auto", resolvedModelName(projectMode()));
         renderWorkspacePanel();
+      }
+      if (event === "credits") {
+        state.accountBilling ||= {};
+        state.accountBilling.credits = payload;
+        if (state.account) state.account.credits = payload;
+        renderAccountModal();
       }
       if (event === "agent") {
         const index = state.liveAgents.findIndex((agent) => agent.id === payload.id);

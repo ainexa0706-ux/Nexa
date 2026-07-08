@@ -6,9 +6,9 @@ Nexa billing is ready for Stripe Checkout. You only need to create Stripe produc
 
 Create recurring monthly prices in Stripe:
 
-- Nexa Plus: JPY 980 / month
-- Nexa Pro: JPY 1,980 / month
-- Nexa Studio: JPY 4,980 / month
+- Nexa Plus: JPY 980 / month, 1,200 credits
+- Nexa Pro: JPY 1,980 / month, 5,000 credits
+- Nexa Studio: JPY 4,980 / month, 12,000 credits
 
 Copy each `price_...` ID.
 
@@ -55,3 +55,5 @@ http://localhost:8787/billing
 ```
 
 Paid plan buttons should become clickable for every plan that has both `STRIPE_SECRET_KEY` and a matching `STRIPE_*_PRICE_ID`.
+
+Credit costs are chat = 1, image generation = 3, and video generation endpoint = 10. The admin panel can grant bonus credits or adjust used credits if support is needed.

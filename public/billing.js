@@ -4,8 +4,9 @@ const fallbackPlans = [
     name: "Nexa 無料",
     priceJpy: 0,
     period: "month",
+    monthlyCredits: 100,
     tagline: "個人で試せる無料プラン",
-    features: ["ローカルAIチャット", "プロジェクト履歴", "基本的なファイル添付"],
+    features: ["毎月100クレジット", "ローカルAIチャット", "プロジェクト履歴", "基本的なファイル添付"],
     checkoutReady: false,
     stripeConfigured: true
   },
@@ -14,8 +15,9 @@ const fallbackPlans = [
     name: "Nexa プラス",
     priceJpy: 980,
     period: "month",
+    monthlyCredits: 1200,
     tagline: "日常利用にちょうどいい軽量プラン",
-    features: ["長期記憶の強化", "生成結果の保存枠アップ", "優先的なローカル実行キュー"],
+    features: ["毎月1,200クレジット", "長期記憶の強化", "生成結果の保存枠アップ", "優先的なローカル実行キュー"],
     checkoutReady: false,
     stripeConfigured: false
   },
@@ -24,9 +26,10 @@ const fallbackPlans = [
     name: "Nexa プロ",
     priceJpy: 1980,
     period: "month",
+    monthlyCredits: 5000,
     recommended: true,
     tagline: "開発、調査、コード生成まで使う人向け",
-    features: ["コードモード強化", "AIチームログ", "高度なワークスペース操作", "優先サポート"],
+    features: ["毎月5,000クレジット", "コードモード強化", "AIチームログ", "高度なワークスペース操作", "優先サポート"],
     checkoutReady: false,
     stripeConfigured: false
   },
@@ -35,8 +38,9 @@ const fallbackPlans = [
     name: "Nexa スタジオ",
     priceJpy: 4980,
     period: "month",
+    monthlyCredits: 12000,
     tagline: "配布や本格運用を見据えた制作者向け",
-    features: ["大きなプロジェクト履歴", "管理者向け機能", "将来のチーム機能優先対応"],
+    features: ["毎月12,000クレジット", "大きなプロジェクト履歴", "管理者向け機能", "将来のチーム機能優先対応"],
     checkoutReady: false,
     stripeConfigured: false
   }
@@ -63,6 +67,17 @@ async function api(path, options = {}) {
 
 function yen(value) {
   return new Intl.NumberFormat("ja-JP").format(Number(value || 0));
+}
+
+function creditAmount(value) {
+  if (value === null || value === undefined) return "無制限";
+  return new Intl.NumberFormat("ja-JP").format(Number(value || 0));
+}
+
+function creditSummaryText(credits) {
+  if (!credits) return "未ログインです。ログインするとクレジット残高を確認できます。";
+  if (credits.unlimited) return `クレジット: 無制限 / 使用済み ${creditAmount(credits.used)}`;
+  return `クレジット: 残り ${creditAmount(credits.remaining)} / ${creditAmount(credits.total)}（${creditAmount(credits.used)} 使用済み）`;
 }
 
 function planLabel(planId = "free") {
@@ -110,6 +125,7 @@ function renderPlans(plans = fallbackPlans, currentPlan = "free") {
         <strong>¥${yen(plan.priceJpy)}</strong>
         <small>/ 月</small>
       </div>
+      <div class="credit-pill">毎月 ${creditAmount(plan.monthlyCredits)} クレジット</div>
       <ul>
         ${(plan.features || []).map((feature) => `<li>${escapeHtml(feature)}</li>`).join("")}
       </ul>
@@ -152,6 +168,7 @@ async function refresh() {
         ? `${data.user?.email || "ログイン中"} / 現在のプラン: ${planLabel(data.plan || "free")}`
         : "未ログインです。プラン内容は確認できます。決済するにはログインしてください。";
     }
+    if ($("#creditStatus")) $("#creditStatus").textContent = creditSummaryText(data.credits);
     $("#checkoutHint").textContent = data.checkoutReady
       ? "Stripe決済を利用できます。"
       : data.authenticated
@@ -160,6 +177,7 @@ async function refresh() {
   } catch (error) {
     renderPlans(fallbackPlans);
     $("#billingStatus").textContent = "プランを見るにはログインしてください。";
+    if ($("#creditStatus")) $("#creditStatus").textContent = creditSummaryText(null);
     $("#checkoutHint").innerHTML = `<a href="/auth">ログインページを開く</a>`;
   }
 }

@@ -196,33 +196,37 @@ const BILLING_PLANS = [
     name: "Nexa 無料",
     priceJpy: 0,
     period: "month",
+    monthlyCredits: 100,
     tagline: "個人で試せる無料プラン",
-    features: ["ローカルAIチャット", "プロジェクト履歴", "基本的なファイル添付"]
+    features: ["毎月100クレジット", "ローカルAIチャット", "プロジェクト履歴", "基本的なファイル添付"]
   },
   {
     id: "plus",
     name: "Nexa プラス",
     priceJpy: 980,
     period: "month",
+    monthlyCredits: 1200,
     tagline: "日常利用にちょうどいい軽量プラン",
-    features: ["長期記憶の強化", "生成結果の保存枠アップ", "優先的なローカル実行キュー"]
+    features: ["毎月1,200クレジット", "長期記憶の強化", "生成結果の保存枠アップ", "優先的なローカル実行キュー"]
   },
   {
     id: "pro",
     name: "Nexa プロ",
     priceJpy: 1980,
     period: "month",
+    monthlyCredits: 5000,
     recommended: true,
     tagline: "開発、調査、コード生成まで使う人向け",
-    features: ["コードモード強化", "AIチームログ", "高度なワークスペース操作", "優先サポート"]
+    features: ["毎月5,000クレジット", "コードモード強化", "AIチームログ", "高度なワークスペース操作", "優先サポート"]
   },
   {
     id: "studio",
     name: "Nexa スタジオ",
     priceJpy: 4980,
     period: "month",
+    monthlyCredits: 12000,
     tagline: "配布や本格運用を見据えた制作者向け",
-    features: ["大きなプロジェクト履歴", "管理者向け機能", "将来のチーム機能優先対応"]
+    features: ["毎月12,000クレジット", "大きなプロジェクト履歴", "管理者向け機能", "将来のチーム機能優先対応"]
   }
 ];
 
@@ -255,6 +259,7 @@ function paidPlanIdOrDefault(planId = "pro") {
 function publicBillingPlans() {
   return BILLING_PLANS.map((plan) => ({
     ...plan,
+    monthlyCredits: monthlyLimitForPlan(plan.id),
     checkoutReady: plan.id !== "free" && checkoutReadyForPlan(plan.id),
     stripeConfigured: plan.id === "free" || Boolean(stripePriceIdForPlan(plan.id))
   }));
@@ -606,7 +611,7 @@ function isOwnerAdmin(store = {}, user = null) {
 function normalizeAuthStore(store = {}) {
   const clean = { ...authDefaults(), ...(store || {}) };
   clean.ownerUserId = typeof clean.ownerUserId === "string" ? clean.ownerUserId : "";
-  clean.users = Array.isArray(clean.users) ? clean.users : [];
+  clean.users = Array.isArray(clean.users) ? clean.users.map((user) => normalizeUserAccount(user)) : [];
   clean.sessions = Array.isArray(clean.sessions) ? clean.sessions : [];
   clean.apiKeys = Array.isArray(clean.apiKeys) ? clean.apiKeys : [];
   clean.billingEvents = Array.isArray(clean.billingEvents) ? clean.billingEvents : [];
@@ -635,6 +640,7 @@ function publicUser(user = null) {
     plan: user.plan || "free",
     status: user.status || "active",
     subscriptionStatus: user.subscriptionStatus || "",
+    credits: creditSummaryForUser(user),
     providers: Object.keys(user.oauth || {}),
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt || ""
@@ -699,6 +705,86 @@ function userEffectivePlan(user = {}) {
   if (user.role === "admin") return "admin";
   if (["plus", "pro", "studio"].includes(user.plan) && ["active", "trialing"].includes(String(user.subscriptionStatus || "active"))) return user.plan;
   return user.plan || "free";
+}
+
+function nextCreditResetAt() {
+  const [year, month] = currentUsageMonth().split("-").map((part) => Number(part));
+  return new Date(Date.UTC(year, month, 1, 0, 0, 0)).toISOString();
+}
+
+function normalizeUserCredits(user = {}) {
+  const month = currentUsageMonth();
+  const previous = user.credits && typeof user.credits === "object" ? user.credits : {};
+  const sameMonth = previous.month === month;
+  user.credits = {
+    month,
+    used: sameMonth ? Math.max(0, Math.floor(Number(previous.used || 0))) : 0,
+    bonus: Math.max(0, Math.floor(Number(previous.bonus || 0))),
+    resetAt: sameMonth && previous.resetAt ? previous.resetAt : nextCreditResetAt(),
+    updatedAt: previous.updatedAt || now()
+  };
+  return user.credits;
+}
+
+function normalizeUserAccount(user = {}) {
+  const clean = { ...user };
+  normalizeUserCredits(clean);
+  return clean;
+}
+
+function creditSummaryForUser(user = {}) {
+  const credits = normalizeUserCredits(user);
+  const plan = userEffectivePlan(user);
+  const monthlyCredits = monthlyLimitForPlan(plan);
+  const unlimited = !Number.isFinite(monthlyCredits);
+  const total = unlimited ? null : monthlyCredits + credits.bonus;
+  const remaining = unlimited ? null : Math.max(0, total - credits.used);
+  return {
+    month: credits.month,
+    plan,
+    monthly: unlimited ? null : monthlyCredits,
+    bonus: credits.bonus,
+    total,
+    used: credits.used,
+    remaining,
+    unlimited,
+    resetAt: credits.resetAt
+  };
+}
+
+async function consumeRequestCredits(req, cost = 1, reason = "chat") {
+  const auth = await getSession(req);
+  if (!auth.user) {
+    return { authenticated: false, user: null, credits: null };
+  }
+  const normalizedCost = Math.max(1, Math.floor(Number(cost || 1)));
+  const credits = normalizeUserCredits(auth.user);
+  const before = creditSummaryForUser(auth.user);
+  if (!before.unlimited && Number(before.remaining || 0) < normalizedCost) {
+    const error = new Error("credits_exhausted");
+    error.status = 402;
+    error.code = "credits_exhausted";
+    error.credits = before;
+    throw error;
+  }
+  credits.used += normalizedCost;
+  credits.updatedAt = now();
+  auth.store.billingEvents.push({
+    id: id("credit"),
+    type: "credits.consumed",
+    planId: before.plan,
+    userId: auth.user.id,
+    credits: normalizedCost,
+    reason,
+    createdAt: now()
+  });
+  auth.store.billingEvents = auth.store.billingEvents.slice(-500);
+  await writeAuthStore(auth.store);
+  return {
+    authenticated: true,
+    user: publicUser(auth.user),
+    credits: creditSummaryForUser(auth.user)
+  };
 }
 
 function authProviderList() {
@@ -5904,6 +5990,15 @@ async function chatStream(req, res) {
       return;
     }
 
+    let creditCharge = null;
+    try {
+      creditCharge = await consumeRequestCredits(req, 1, "chat");
+    } catch (error) {
+      send("error", { error: error.message, code: error.code || "", credits: error.credits || null });
+      res.end();
+      return;
+    }
+
     if (body.mode !== undefined) project.mode = normalizeChatMode(body.mode);
     if (body.accessLevel !== undefined) {
       project.accessLevel = normalizeAccessLevel(body.accessLevel);
@@ -5976,6 +6071,7 @@ async function chatStream(req, res) {
     project.messages.push(userMessage);
 
     send("system", system);
+    if (creditCharge?.credits) send("credits", creditCharge.credits);
     send("user", userMessage);
     send("tool", {
       id: "workspace.context",
@@ -8504,6 +8600,15 @@ async function simpleChatStream(req, res) {
       return;
     }
 
+    let creditCharge = null;
+    try {
+      creditCharge = await consumeRequestCredits(req, 1, "chat");
+    } catch (error) {
+      send("error", { error: error.message, code: error.code || "", credits: error.credits || null });
+      res.end();
+      return;
+    }
+
     const system = await systemProfile();
     let model = system.plan.conversation || system.plan.fast;
     const history = project.messages
@@ -8552,6 +8657,7 @@ async function simpleChatStream(req, res) {
     };
 
     send("system", system);
+    if (creditCharge?.credits) send("credits", creditCharge.credits);
     send("user", userMessage);
 
     const company = await runCompanyAgents(project, userText, history, system, send, agentContext);
@@ -8648,6 +8754,16 @@ async function companyChatStream(req, res) {
       return;
     }
 
+    let creditCharge = null;
+    try {
+      creditCharge = await consumeRequestCredits(req, 1, "chat");
+    } catch (error) {
+      send("error", { error: error.message, code: error.code || "", credits: error.credits || null });
+      finished = true;
+      res.end();
+      return;
+    }
+
     if (body.mode !== undefined) project.mode = normalizeChatMode(body.mode);
     if (body.accessLevel !== undefined) {
       project.accessLevel = normalizeAccessLevel(body.accessLevel);
@@ -8734,6 +8850,7 @@ async function companyChatStream(req, res) {
     project.messages.push(userMessage);
 
     send("system", system);
+    if (creditCharge?.credits) send("credits", creditCharge.credits);
     send("user", userMessage);
 
     const assistantMessage = {
@@ -9771,6 +9888,7 @@ async function handleBillingApi(req, res, url) {
       authenticated,
       plan: auth.user ? userEffectivePlan(auth.user) : "free",
       user: auth.user ? publicUser(auth.user) : null,
+      credits: auth.user ? creditSummaryForUser(auth.user) : null,
       plans,
       stripeConfigured: Boolean(STRIPE_SECRET_KEY && anyStripePriceConfigured()),
       checkoutReady: authenticated && Boolean(STRIPE_SECRET_KEY && anyStripePriceConfigured()),
@@ -9828,11 +9946,13 @@ async function handleAdminApi(req, res, url) {
     const activeUsers = auth.store.users.filter(activeUser).length;
     const bannedUsers = auth.store.users.filter((user) => blockedUserStatus(user.status)).length;
     const proUsers = auth.store.users.filter((user) => user.plan === "pro").length;
+    const creditUsed = auth.store.users.reduce((sum, user) => sum + Number(creditSummaryForUser(user).used || 0), 0);
     json(res, 200, {
       users: auth.store.users.length,
       activeUsers,
       bannedUsers,
       proUsers,
+      creditUsed,
       ownerUserId: auth.store.ownerUserId || "",
       plans: publicBillingPlans(),
       stripeConfigured: Boolean(STRIPE_SECRET_KEY && anyStripePriceConfigured() && STRIPE_WEBHOOK_SECRET)
@@ -9863,6 +9983,16 @@ async function handleAdminApi(req, res, url) {
     if ("plan" in body) {
       const requestedPlan = String(body.plan || "free");
       user.plan = BILLING_PLANS.some((plan) => plan.id === requestedPlan) ? requestedPlan : "free";
+    }
+    if ("bonusCredits" in body || "creditsBonus" in body) {
+      const credits = normalizeUserCredits(user);
+      credits.bonus = Math.max(0, Math.floor(Number(body.bonusCredits ?? body.creditsBonus ?? 0)));
+      credits.updatedAt = now();
+    }
+    if ("creditsUsed" in body) {
+      const credits = normalizeUserCredits(user);
+      credits.used = Math.max(0, Math.floor(Number(body.creditsUsed || 0)));
+      credits.updatedAt = now();
     }
     if ("status" in body) {
       const nextStatus = ["banned", "disabled"].includes(String(body.status || "")) ? "banned" : "active";
@@ -9970,9 +10100,12 @@ async function route(req, res) {
     if (req.method === "POST" && (url.pathname === "/api/generate/image" || url.pathname === "/api/generate/video")) {
       try {
         const kind = url.pathname.endsWith("/video") ? "video" : "image";
-        json(res, 200, await generateMediaArtifact(await readBody(req, 2 * 1024 * 1024), kind));
+        const body = await readBody(req, 2 * 1024 * 1024);
+        const creditCharge = await consumeRequestCredits(req, kind === "video" ? 10 : 3, `${kind}-generation`);
+        const result = await generateMediaArtifact(body, kind);
+        json(res, 200, { ...result, credits: creditCharge.credits || null });
       } catch (error) {
-        json(res, error.status || 500, { ok: false, error: error.message, code: error.code || "" });
+        json(res, error.status || 500, { ok: false, error: error.message, code: error.code || "", credits: error.credits || null });
       }
       return;
     }

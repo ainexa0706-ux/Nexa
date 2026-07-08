@@ -38,6 +38,16 @@ function planLabel(planId = "free") {
   }[planId] || planId;
 }
 
+function numberLabel(value) {
+  return new Intl.NumberFormat("ja-JP").format(Number(value || 0));
+}
+
+function creditLabel(credits) {
+  if (!credits) return "残高を確認できませんでした。";
+  if (credits.unlimited) return `無制限 / ${numberLabel(credits.used)} 使用済み`;
+  return `残り ${numberLabel(credits.remaining)} / ${numberLabel(credits.total)}（${numberLabel(credits.used)} 使用済み）`;
+}
+
 function roleLabel(role = "user") {
   return role === "admin" ? "管理者" : "ユーザー";
 }
@@ -139,6 +149,7 @@ function renderAccount() {
   if (!loggedIn) return;
   $("#userLabel").textContent = `${state.user.name || state.user.email} / ${roleLabel(state.user.role)}`;
   $("#planLabel").textContent = `プラン: ${planLabel(state.user.plan || "free")} ${state.user.subscriptionStatus || ""}`.trim();
+  if ($("#creditLabel")) $("#creditLabel").textContent = creditLabel(state.user.credits);
   $("#adminLinkRow")?.classList.toggle("hidden", state.user.role !== "admin");
 }
 

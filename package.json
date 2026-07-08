@@ -1,6 +1,6 @@
 {
     "name": "nexa",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "description": "Local-first multi-agent AI workspace powered by Ollama.",
     "type": "module",
     "main": "electron/main.cjs",

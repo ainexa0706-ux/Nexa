@@ -10,10 +10,13 @@ Use this checklist before sharing Nexa publicly.
 - [ ] Run `npm run test`.
 - [ ] Run `npm run build`.
 - [ ] Run `npm run dist:win`.
-- [ ] Confirm `dist/Nexa-Setup-1.0.13.exe` exists.
+- [ ] Confirm `dist/Nexa-Setup-<version>.exe` exists.
 - [ ] Confirm `/download/installer` returns the same installer.
 - [ ] Confirm `/lp.html` opens and has no mojibake.
+- [ ] Confirm the public LP opens at `https://ainexa0706-ux.github.io/Nexa/`.
 - [ ] Confirm the app starts at `http://localhost:8787`.
+- [ ] Confirm `/billing` shows plan credits and current credit balance.
+- [ ] Confirm `/admin` can update a user's bonus credits and used credits.
 - [ ] Confirm short prompts show Choice gate options when ambiguous.
 - [ ] Confirm dangerous prompts show safety choices.
 - [ ] Confirm code mode asks for a PC folder before direct writes.
@@ -40,3 +43,4 @@ Use this checklist before sharing Nexa publicly.
 - Add rate limits, abuse protection, and usage logging to that proxy.
 - Keep local Ollama fallback enabled for offline use.
 - Tell users that Ollama model downloads require additional disk space.
+- Credit costs in this public build are chat = 1, image = 3, video endpoint = 10.

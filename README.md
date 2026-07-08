@@ -27,6 +27,12 @@ The landing page is available at:
 http://localhost:8787/lp.html
 ```
 
+The public landing page is available at:
+
+```text
+https://ainexa0706-ux.github.io/Nexa/
+```
+
 ## Start Locally
 
 ```powershell
@@ -64,7 +70,8 @@ The installer is generated in `dist/`.
 - Cloud-to-local fallback
 - Choice gate for short, ambiguous, or risky requests
 - Email/password login with HTTP-only sessions
-- Admin panel for users, billing events, and usage
+- Monthly credit accounting for chat, image generation, and video generation
+- Admin panel for users, billing events, credits, and usage
 - Stripe Checkout billing foundation with webhook signature verification
 - Workspace file reading, direct file writing, diff review, and checks
 - File attachments and selected-folder context
@@ -130,6 +137,21 @@ setx STRIPE_WEBHOOK_SECRET "<stripe-webhook-secret>"
 ```
 
 For production, also set `APP_PUBLIC_URL`, `STRIPE_SUCCESS_URL`, and `STRIPE_CANCEL_URL` to your HTTPS domain.
+
+Credit costs in this build:
+
+- Chat: 1 credit
+- Image generation: 3 credits
+- Video generation endpoint: 10 credits
+
+Monthly plan credits:
+
+- Free: 100 credits
+- Plus: 1,200 credits
+- Pro: 5,000 credits
+- Studio: 12,000 credits
+
+Nexa Admin can change a user's plan, BAN status, bonus credits, and used credits.
 
 ## Main Files
 
