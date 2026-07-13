@@ -4629,21 +4629,42 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
     const scopes = new Set(["small", "medium", "large"]);
     const qualityBars = new Set(["prototype", "standard", "production"]);
     let resolvedRequest = clip(String(parsed.resolvedRequest || "").trim(), 1600);
-    const userDemandsHighQuality = /\b(?:realistic|production(?:-ready)?|high[- ]quality|large[- ]scale|enterprise|complete|full)\b/i.test(submittedText) ||
-      /(?:リアル|本格|高品質|大規模|完成版|製品版|本番品質|作り込)/.test(submittedText);
+    const previousGoal = latestImplementationRequest(project);
+    const retriesPreviousWork = parsed.action === "continue" && isTerseContinuationRequest(submittedText) && previousGoal;
+    const qualityEvidence = retriesPreviousWork ? `${submittedText}\n${previousGoal}` : submittedText;
+    const previousProfile = retriesPreviousWork ? latestSemanticDeliveryProfile(project) : null;
+    const userDemandsHighQuality = requestDemandsHighQuality(qualityEvidence);
     const resolutionDowngradesQuality = /\b(?:basic|minimal|demo|prototype|starter|skeleton|structure only)\b/i.test(resolvedRequest) ||
-      /(?:基本構成|最小構成|土台だけ|プロトタイプ|デモ版)/.test(resolvedRequest);
-    if (userDemandsHighQuality && resolutionDowngradesQuality) {
-      resolvedRequest = `${submittedText}。要求を基本構成やデモへ縮小せず、操作可能性・主要機能・エラー処理・検証まで含む完成度の高い成果物として実装する。`;
+      /(?:基本構成|最小構成|土台だけ|プロトタイプ|デモ版|ひな形|骨組みだけ)/.test(resolvedRequest);
+    if (retriesPreviousWork) {
+      resolvedRequest = [
+        `直前の実装目的を最初から再実行する: ${previousGoal}`,
+        "前回の生成失敗を引き継がず、現在の作業フォルダーを確認して必要な構成を再設計する。",
+        "成果物を実ファイルへ保存し、構文・起動・主要操作を検証して、失敗した箇所は修正後に再検証する。",
+        "最小構成や汎用テンプレートへ縮小せず、直前の依頼で要求された品質と規模を維持する。"
+      ].join("\n");
     }
+    if (userDemandsHighQuality && resolutionDowngradesQuality) {
+      resolvedRequest = `${qualityEvidence}\n要求を基本構成やデモへ縮小せず、主要機能・操作性・エラー処理・検証まで含む完成度の高い成果物として実装する。`;
+    }
+    const resolvedScope = higherDeliveryValue(
+      scopes.has(parsed.scope) ? parsed.scope : "medium",
+      previousProfile?.scope,
+      ["small", "medium", "large"]
+    );
+    const resolvedQuality = userDemandsHighQuality
+      ? "production"
+      : higherDeliveryValue(
+        qualityBars.has(parsed.qualityBar) ? parsed.qualityBar : "standard",
+        previousProfile?.qualityBar,
+        ["prototype", "standard", "production"]
+      );
     return {
       action: parsed.action,
       continuation: Boolean(parsed.continuation),
       target: parsed.target,
-      scope: scopes.has(parsed.scope) ? parsed.scope : "medium",
-      qualityBar: userDemandsHighQuality
-        ? "production"
-        : (qualityBars.has(parsed.qualityBar) ? parsed.qualityBar : "standard"),
+      scope: resolvedScope,
+      qualityBar: resolvedQuality,
       needsCode: Boolean(parsed.needsCode),
       needsResearch: Boolean(parsed.needsResearch),
       needsInternet: Boolean(parsed.needsInternet),
@@ -4750,7 +4771,7 @@ async function restoreStagedWorkspace(project, staged = {}) {
 
 function expectedFilesForLog(userText = "", route = {}) {
   if (route?.intent?.failureFollowUp || /動くように|動かして|起動できるように|正常に動作/i.test(String(userText || ""))) return [];
-  if (route?.intent?.semanticAction === "create") {
+  if (["create", "continue"].includes(route?.intent?.semanticAction)) {
     const explicitFiles = inferRequestedFiles(userText);
     return explicitFiles.length ? explicitFiles : ["必要なファイル"];
   }
@@ -4812,7 +4833,9 @@ async function workspaceDevelopmentLogSummary(project = null) {
     detail: visible.length
       ? `${folderName} にはファイル${files.length}件、フォルダー${dirs.length}件があります。${sample.length ? `確認した項目: ${sample.join(", ")}` : ""}`
       : `${folderName} は空でした。これから必要なファイルを新しく作成します。`,
-    empty: visible.length === 0,
+    // Empty directories are scaffolding, not an existing implementation. The
+    // artifact generator should still be allowed to create the first files.
+    empty: files.length === 0,
     fileCount: files.length,
     dirCount: dirs.length,
     sample
@@ -7511,11 +7534,39 @@ function latestImplementationRequest(project = null) {
   const candidate = messages.find((message) => {
     if (message.role !== "user") return false;
     const text = String(message.content || "").trim();
-    if (!text || isExplicitSafetyApproval(text)) return false;
+    if (!text || isExplicitSafetyApproval(text) || isTerseContinuationRequest(text)) return false;
     if (/^(?:動かない|動くようにして|動かして|起動しない|起動できるようにして|反応しない|表示されない|エラー|バグ|直して)[よね。.!！\s]*$/i.test(text)) return false;
     return /(作って|作成|実装|ゲーム|アプリ|サイト|LP|コード|修正|変更|追加|削除|build|create|implement|fix)/i.test(text);
   });
   return candidate ? executableRequestFromSafetyPrompt(candidate.content) : "";
+}
+
+function isTerseContinuationRequest(value = "") {
+  const text = String(value || "").replace(/\s+/g, "").trim();
+  if (!text || [...text].length > 32) return false;
+  return /^(?:もう一回(?:作って)?|もう一度(?:作って)?|再度(?:作って)?|やり直して|作り直して|続けて|続きをやって|続きやって|それやって|実行して|再実行して|retry|again|continue)[。.!！?？]*$/i.test(text);
+}
+
+function requestDemandsHighQuality(value = "") {
+  const text = String(value || "");
+  return /\b(?:realistic|production(?:-ready)?|high[- ]quality|large[- ]scale|enterprise|complete|full)\b/i.test(text) ||
+    /(?:リアル|本格|高品質|大規模|商用品質|製品品質|作り込み|完成形)/.test(text);
+}
+
+function latestSemanticDeliveryProfile(project = null) {
+  const run = [...(project?.runs || [])]
+    .reverse()
+    .find((item) => item?.intent?.semanticScope || item?.intent?.qualityBar);
+  return run ? {
+    scope: run.intent.semanticScope || "",
+    qualityBar: run.intent.qualityBar || ""
+  } : null;
+}
+
+function higherDeliveryValue(current, previous, order) {
+  const currentIndex = Math.max(0, order.indexOf(current));
+  const previousIndex = order.indexOf(previous);
+  return order[Math.max(currentIndex, previousIndex)] || current;
 }
 
 function resolveCodeFollowUpContext(project, submittedText = "") {
@@ -8474,7 +8525,7 @@ function parseCodeArtifactManifest(text = "", fallbackPaths = [], userText = "")
   return files.slice(0, 64);
 }
 
-function artifactManifestGaps(files = [], qualityBar = "standard") {
+function artifactManifestGaps(files = [], qualityBar = "standard", userText = "") {
   const paths = files.map((file) => String(file.path || "").toLowerCase());
   const gaps = [];
   const hasRuntimeEntry = paths.some((filePath) =>
@@ -8482,6 +8533,15 @@ function artifactManifestGaps(files = [], qualityBar = "standard") {
     /(?:^|\/)(?:main|app|server|program)\.(?:js|mjs|cjs|ts|tsx|py|cs|go|rs|java|kt)$/.test(filePath)
   );
   if (!hasRuntimeEntry) gaps.push("runnable entry point or project configuration");
+  if (is3DShooterRequest(userText)) {
+    const has3DEngineDependency = paths.some((filePath) =>
+      /(?:^|\/)package\.json$/.test(filePath) ||
+      /(?:^|\/)packages\/manifest\.json$/.test(filePath) ||
+      /(?:^|\/)project\.godot$/.test(filePath) ||
+      /(?:^|\/)[^/]+\.(?:csproj|sln)$/.test(filePath)
+    );
+    if (!has3DEngineDependency) gaps.push("3D engine dependency manifest");
+  }
   if (qualityBar === "production") {
     if (!paths.some((filePath) => /(?:^|\/)(?:test|tests|__tests__)(?:\/|\.)|\.(?:test|spec)\./.test(filePath))) gaps.push("focused tests");
     if (!paths.some((filePath) => /(?:^|\/)readme(?:\.[^/]+)?$/.test(filePath))) gaps.push("setup and run documentation");
@@ -8500,7 +8560,9 @@ async function codeArtifactManifestCall(model, userText, context, fallbackPaths 
         "Return one JSON object only: {\"stack\":\"...\",\"architecture\":\"...\",\"acceptanceCriteria\":[\"...\"],\"files\":[{\"path\":\"relative/path.ext\",\"purpose\":\"...\"}]}",
         "Choose every text file needed for a complete runnable implementation. There is no three-file limit.",
         "Use the repository framework when one exists. For an empty folder, choose a conventional maintainable structure.",
+        "Choose one coherent technology stack. Never mix browser TypeScript, Unity C#, Godot, or another engine unless the repository already integrates them.",
         "Plan the real product surface: runtime entry points, domain modules, state or persistence, assets/configuration, error handling, tests, and runnable scripts when relevant.",
+        "For 3D software, include the engine dependency manifest and the files that load and initialize that engine; source files alone are not runnable.",
         "Do not reduce a production or large request to a basic demo. Prefer a proven domain engine or framework when the task has established physics, rendering, parsing, or protocol rules.",
         "Paths must be real relative paths. Do not include prose, markdown, absolute paths, placeholders, generated binaries, secrets, node_modules, build output, or lock files."
       ].join(" ")
@@ -8579,7 +8641,7 @@ async function codeArtifactManifestCall(model, userText, context, fallbackPaths 
   });
   const reviewed = parseCodeArtifactManifest(reviewedRaw, [], userText);
   let selected = reviewed.length >= Math.max(2, Math.ceil(draft.length * 0.75)) ? reviewed : draft;
-  const gaps = artifactManifestGaps(selected, options.qualityBar);
+  const gaps = artifactManifestGaps(selected, options.qualityBar, userText);
   if (gaps.length) {
     emitProcessEvent(options, processEvent("thinking", "実行可能性の不足を補う", `${gaps.join(", ")} を設計へ追加します。`, { gaps }));
     const repairedPlanRaw = await llmChat(planningModel, [
@@ -8601,7 +8663,7 @@ async function codeArtifactManifestCall(model, userText, context, fallbackPaths 
       onFallback: options.onFallback
     });
     const repairedPlan = parseCodeArtifactManifest(repairedPlanRaw, [], userText);
-    if (repairedPlan.length && artifactManifestGaps(repairedPlan, options.qualityBar).length < gaps.length) selected = repairedPlan;
+    if (repairedPlan.length && artifactManifestGaps(repairedPlan, options.qualityBar, userText).length < gaps.length) selected = repairedPlan;
   }
   return selected;
 }
@@ -8915,6 +8977,16 @@ function generatedFileBlocksMarkdown(blocks = []) {
       return `\`\`\`file path="${block.path}"\n${content}\n\`\`\``;
     })
     .join("\n\n");
+}
+
+function mergeGeneratedFileBlocks(baseBlocks = [], updateBlocks = []) {
+  const merged = new Map();
+  for (const block of [...baseBlocks, ...updateBlocks]) {
+    const filePath = normalizeGeneratedFilePath(block?.path);
+    if (!filePath) continue;
+    merged.set(filePath, { ...block, path: filePath });
+  }
+  return [...merged.values()];
 }
 
 function isLandingPageRequest(userText = "") {
@@ -10913,7 +10985,7 @@ async function implementationRequirementGaps(project, userText = "", result = {}
     { requested: /削除|delete|remove/.test(request), met: /delete|remove|削除/.test(code), label: "delete behavior" },
     { requested: /(?:項目|データ|ユーザー|タスク|投稿).{0,12}(?:追加|作成)|add\s+(?:item|record|user|task|post)/.test(request), met: /add|create|submit|追加/.test(code), label: "create/add behavior" },
     { requested: /テスト|test/.test(request), met: /\btest\b|describe\s*\(|it\s*\(/.test(code), label: "tests" },
-    { requested: wants3DShooter, met: /three(?:\.module)?(?:\.min)?\.js|from\s+["']three["']|importmap[\s\S]*three/.test(code), label: "3D engine dependency loading" },
+    { requested: wants3DShooter, met: /three(?:\.module)?(?:\.min)?\.js|from\s+["']three["']|importmap[\s\S]*three|["']three["']\s*:\s*["']|(?:unpkg\.com|cdn\.jsdelivr\.net)[^\s"']*three/i.test(code), label: "3D engine dependency loading" },
     { requested: wants3DShooter, met: /pointerlock|requestpointerlock|mousemove|pointermove|movementx|camera\.rotation/.test(code) && /keydown|keyup|keyw|keya|keys?\[|\bwasd\b/.test(code), label: "first-person camera controls" },
     { requested: wants3DShooter, met: /raycaster|projectile|bullet|weapon|shoot|fire|mousedown|pointerdown|click/.test(code), label: "shooting and hit detection" },
     { requested: wants3DShooter, met: /enemy|enemies|target|opponent/.test(code), label: "enemy or target gameplay" }
@@ -11138,7 +11210,7 @@ async function materializeCoderOutput(project, route, model, userText, context, 
       folderPath: project.workspaceRoot || project.selectedFolderPath || ""
     }));
     const folderSummary = await workspaceDevelopmentLogSummary(project);
-    workspaceWasEmpty = Boolean(folderSummary.empty);
+    workspaceWasEmpty = folderSummary.fileCount === 0;
     emitProcessEvent(options, processEvent("thinking", folderSummary.title, folderSummary.detail, {
       empty: folderSummary.empty,
       fileCount: folderSummary.fileCount,
@@ -11149,8 +11221,9 @@ async function materializeCoderOutput(project, route, model, userText, context, 
   emitProcessEvent(options, processEvent("thinking", "作成する構成を決定", describeBuildTarget(userText, route)));
   emitProcessEvent(options, processEvent("thinking", "保存できる形式を準備", "実ファイルとして書き込めるパスと内容に整えています。"));
 
+  const freshArtifactAction = route.intent?.semanticAction === "create" || route.intent?.semanticAction === "continue";
   const shouldSegmentNewArtifact = AI_CODE_GENERATION_ONLY && project.workspaceReady && workspaceWasEmpty && model &&
-    (route.intent?.taskKind === "code_create" || route.intent?.semanticAction === "create" || isGenericCreateFallbackRequest(userText));
+    (route.intent?.taskKind === "code_create" || freshArtifactAction || isGenericCreateFallbackRequest(userText));
   if (shouldSegmentNewArtifact) {
     segmentedAttempted = true;
     try {
@@ -11247,12 +11320,19 @@ async function materializeCoderOutput(project, route, model, userText, context, 
               { requirementGaps, criticalRequirementGaps }
             ));
             if (criticalRequirementGaps.length && model && attempt < 3) {
+              const currentPaths = mergeGeneratedFileBlocks(segmentedBlocks, fileBlocks).map((block) => block.path);
               const retry = cleanCoderOutput(await strictCoderRepairCall(
                 model,
                 userText,
                 context,
                 finalCoderOutput,
-                `missing_required_behavior:${criticalRequirementGaps.join(",")}. Emit valid file blocks or a unified diff that implements every critical missing behavior in the existing generated files.`,
+                [
+                  `missing_required_behavior:${criticalRequirementGaps.join(",")}.`,
+                  `Existing generated files: ${currentPaths.join(", ")}.`,
+                  "Preserve the current technology stack and architecture. Do not introduce an unrelated language, engine, or framework.",
+                  "For a web 3D project, add or correct package.json/import loading and the existing browser entry files. For Unity, stay entirely within the Unity project structure.",
+                  "Return only the complete files that must be added or modified to satisfy the missing behavior."
+                ].join(" "),
                 {
                   signal: options.signal,
                   fallbackModel: options.fallbackModel,
@@ -11260,9 +11340,13 @@ async function materializeCoderOutput(project, route, model, userText, context, 
                 }
               ));
               if (retry && !retry.startsWith("fallback:") && retry !== finalCoderOutput) {
-                finalCoderOutput = retry;
-                repaired = true;
-                continue;
+                const retryBlocks = extractGeneratedFileBlocks(retry);
+                if (retryBlocks.length) {
+                  segmentedBlocks = mergeGeneratedFileBlocks(segmentedBlocks.length ? segmentedBlocks : fileBlocks, retryBlocks);
+                  finalCoderOutput = generatedFileBlocksMarkdown(segmentedBlocks);
+                  repaired = true;
+                  continue;
+                }
               }
             }
             if (criticalRequirementGaps.length) {
@@ -11387,7 +11471,7 @@ async function materializeCoderOutput(project, route, model, userText, context, 
       lastError = "writable_file_block_or_valid_diff_not_found";
       emitProcessEvent(options, processEvent("thinking", "保存前チェックで問題を検出", "そのままではファイルへ保存できない出力だったため、補修ルートに切り替えます。"));
       const canSegmentNewArtifact = !segmentedAttempted && attempt === 0 && AI_CODE_GENERATION_ONLY && project.workspaceReady && workspaceWasEmpty &&
-        (route.intent?.taskKind === "code_create" || isGenericCreateFallbackRequest(userText));
+        (route.intent?.taskKind === "code_create" || freshArtifactAction || isGenericCreateFallbackRequest(userText));
       if (canSegmentNewArtifact && model) {
         try {
           const segmented = await generateSegmentedCodeArtifacts(model, project, userText, context, route, {
@@ -11900,11 +11984,21 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     emit(agentItem("strategist", "Deep strategy pass not required."));
   }
 
+  let useDirectArtifactPipeline = false;
+  if (route.needsCode && project.workspaceReady && ["create", "continue"].includes(route.intent?.semanticAction)) {
+    try {
+      const summary = await workspaceDevelopmentLogSummary(project);
+      useDirectArtifactPipeline = summary.fileCount === 0;
+    } catch {
+      useDirectArtifactPipeline = false;
+    }
+  }
+
   if (route.needsCode && codeModel) {
     emitStep("thinking", "保存するコードを生成", project.workspaceReady
       ? `選択フォルダーへ直接保存できる file ブロックまたは差分を作ります。想定ファイル: ${requestedFilesForLog}`
       : `フォルダー未選択のため、保存可能なコード案だけ準備します。想定ファイル: ${requestedFilesForLog}`);
-    if (project.workspaceReady && route.intent?.semanticAction === "create") {
+    if (useDirectArtifactPipeline) {
       emit(agentItem("coder", "The direct artifact pipeline will plan architecture and generate each file independently inside the selected workspace.", codeModel));
     } else {
       const note = cleanCoderOutput(await coderAgentCall(codeModel, userText, context, llmOptions(localCodeModel || localSmartModel, { signal: options.signal })));
