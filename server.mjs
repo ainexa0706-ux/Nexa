@@ -3610,7 +3610,7 @@ async function workspacePatch(body) {
         changedLines: before.split("\n").length,
         diff: compactDiff(before, "")
       });
-      writes.push({ file, delete: true });
+      writes.push({ file, delete: true, before, existed: true });
       continue;
     }
 
@@ -3630,7 +3630,7 @@ async function workspacePatch(body) {
       diff: compactDiff(before, after)
     };
     files.push(result);
-    writes.push({ file, content: after });
+    writes.push({ file, content: after, before, existed: exists });
   }
 
   if (!dryRun) {
@@ -3675,7 +3675,40 @@ async function workspacePatch(body) {
     }
   }
 
-  return { dryRun, applied: !dryRun, files, project };
+  const result = { dryRun, applied: !dryRun, files, project };
+  if (!dryRun) {
+    Object.defineProperty(result, "rollbackWrites", {
+      value: writes.map(({ file, before, existed }) => ({ file, before, existed })),
+      enumerable: false
+    });
+  }
+  return result;
+}
+
+async function rollbackWorkspacePatch(result) {
+  const writes = Array.isArray(result?.rollbackWrites) ? [...result.rollbackWrites].reverse() : [];
+  for (const write of writes) {
+    if (write.existed) {
+      await mkdir(path.dirname(write.file), { recursive: true });
+      const tmp = `${write.file}.${process.pid}.rollback.tmp`;
+      await writeFile(tmp, write.before, "utf8");
+      await rename(tmp, write.file);
+      continue;
+    }
+    try {
+      await unlink(write.file);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+
+  const project = result?.project;
+  const latestRun = project?.runs?.at(-1);
+  if (latestRun?.type === "patch" && latestRun.command === "workspace patch") {
+    project.runs.pop();
+    await saveProject(project);
+  }
+  return writes.length;
 }
 
 async function workspaceSearch(query, limit = 80, project = null) {
@@ -4613,7 +4646,7 @@ function semanticExecutionRequest(decision, submittedText) {
     : decision.target === "new-artifact"
       ? "対象は今回新しく作る成果物。"
       : "対象は現在の会話。";
-  return `${target}\n処理方針: ${action}。\nユーザーの最新依頼: ${submittedText}\n意味判断AIの具体化: ${decision.resolvedRequest}`;
+  return `${target}\n${action}。\n最新依頼: ${submittedText}\n具体的な完了条件: ${decision.resolvedRequest}`;
 }
 
 function isProtectedRebuildEntry(name = "") {
@@ -8360,6 +8393,142 @@ async function strictCoderRepairCall(model, userText, context, previousOutput, f
   }
 }
 
+function parseCodeArtifactManifest(text = "", fallbackPaths = [], userText = "") {
+  const source = stripThinking(String(text || "")).trim();
+  let parsed = null;
+  const jsonStart = source.indexOf("{");
+  const jsonEnd = source.lastIndexOf("}");
+  if (jsonStart >= 0 && jsonEnd > jsonStart) {
+    try { parsed = JSON.parse(source.slice(jsonStart, jsonEnd + 1)); } catch { parsed = null; }
+  }
+  const candidates = Array.isArray(parsed?.files) ? parsed.files : [];
+  const files = [];
+  const seen = new Set();
+  const add = (pathValue, purpose = "") => {
+    const filePath = normalizeGeneratedFilePath(pathValue);
+    if (!filePath || seen.has(filePath)) return;
+    seen.add(filePath);
+    files.push({ path: filePath, purpose: String(purpose || filePurposeForLog(filePath, userText)).slice(0, 500) });
+  };
+  for (const item of candidates) {
+    if (typeof item === "string") add(item);
+    else add(item?.path, item?.purpose);
+  }
+  for (const filePath of fallbackPaths) add(filePath);
+  return files.slice(0, 40);
+}
+
+async function codeArtifactManifestCall(model, userText, context, fallbackPaths = [], options = {}) {
+  if (!model) return [];
+  const raw = await llmChat(model, [
+    {
+      role: "system",
+      content: [
+        "You are Nexa's code artifact planner.",
+        "Return one JSON object only: {\"files\":[{\"path\":\"relative/path.ext\",\"purpose\":\"...\"}]}",
+        "Choose every text file needed for a complete runnable implementation. There is no three-file limit.",
+        "Use the repository framework when one exists. For an empty folder, choose a conventional maintainable structure.",
+        "Paths must be real relative paths. Do not include prose, markdown, absolute paths, placeholders, generated binaries, secrets, node_modules, build output, or lock files."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: [
+        `Primary request:\n${userText}`,
+        `Likely files (use only when appropriate):\n${fallbackPaths.join("\n") || "none"}`,
+        `Workspace evidence:\n${clip(context, 9000)}`
+      ].join("\n\n")
+    }
+  ], {
+    numPredict: 1400,
+    temperature: 0.08,
+    timeout: options.timeout ?? 90000,
+    signal: options.signal,
+    fallbackModel: options.fallbackModel,
+    onFallback: options.onFallback
+  });
+  return parseCodeArtifactManifest(raw, fallbackPaths, userText);
+}
+
+function extractSingleGeneratedFile(text = "", requestedPath = "") {
+  const expectedPath = normalizeGeneratedFilePath(requestedPath);
+  if (!expectedPath) return null;
+  const blocks = extractGeneratedFileBlocks(text);
+  const exact = blocks.find((block) => block.path === expectedPath && block.operation !== "delete");
+  if (exact) return exact;
+  const source = stripThinking(String(text || "")).trim();
+  const genericFence = source.match(/```(?:[A-Za-z0-9_+.-]+)?\s*\n([\s\S]*?)```/);
+  const content = cleanGeneratedFileContent(genericFence?.[1] || source);
+  if (!content || !generatedFileContentLooksWritable(expectedPath, content)) return null;
+  return { path: expectedPath, content, operation: "write" };
+}
+
+async function singleCodeArtifactCall(model, userText, context, manifest, file, completedBlocks = [], options = {}) {
+  if (!model) return null;
+  const related = completedBlocks
+    .map((block) => `--- ${block.path} ---\n${clip(block.content, 5000)}`)
+    .join("\n\n");
+  const raw = await llmChat(model, [
+    {
+      role: "system",
+      content: [
+        "You are Nexa's implementation agent.",
+        `Generate exactly one complete file: ${file.path}.`,
+        "Return one fenced file block only, using the exact relative path. No prose or analysis.",
+        "The file must contain production-quality, runnable implementation rather than placeholders or TODOs.",
+        "Keep it consistent with the manifest and already generated files. Implement the user's actual genre and requirements; never substitute a canned template.",
+        "Use accessible responsive UI for frontend files and robust error handling for executable code where relevant."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: [
+        `Primary request:\n${userText}`,
+        `Target file:\n${file.path}`,
+        `Purpose:\n${file.purpose}`,
+        `Artifact manifest:\n${JSON.stringify({ files: manifest }, null, 2)}`,
+        `Workspace evidence:\n${clip(context, 9000)}`,
+        related ? `Already generated files for interface consistency:\n${clip(related, 14000)}` : ""
+      ].filter(Boolean).join("\n\n")
+    }
+  ], {
+    numPredict: /(?:readme|\.md$|\.json$)/i.test(file.path) ? 2200 : 5200,
+    temperature: 0.16,
+    timeout: options.timeout ?? 120000,
+    signal: options.signal,
+    fallbackModel: options.fallbackModel,
+    onFallback: options.onFallback
+  });
+  return extractSingleGeneratedFile(raw, file.path);
+}
+
+async function generateSegmentedCodeArtifacts(model, project, userText, context, route, options = {}) {
+  const likelyFiles = expectedFilesForLog(userText, route).filter((filePath) => filePath !== "必要なファイル");
+  emitProcessEvent(options, processEvent("thinking", "必要なファイルを設計", "一括出力ではなく、ファイル単位で安全に生成できる構成へ分解します。"));
+  const manifest = await codeArtifactManifestCall(model, userText, context, likelyFiles, options);
+  if (!manifest.length) throw new Error("code_artifact_manifest_empty");
+  emitProcessEvent(options, processEvent("thinking", "実装構成を確定", `${manifest.length}件のファイルを順番に生成します。`, {
+    files: manifest.map((file) => ({ path: file.path, purpose: file.purpose }))
+  }));
+  const blocks = [];
+  for (let index = 0; index < manifest.length; index += 1) {
+    const file = manifest[index];
+    emitProcessEvent(options, processEvent("thinking", `${file.path} を実装`, `${index + 1}/${manifest.length} ${file.purpose}`, {
+      file: file.path,
+      index: index + 1,
+      total: manifest.length
+    }));
+    let block = await singleCodeArtifactCall(model, userText, context, manifest, file, blocks, options);
+    if (!block) {
+      emitProcessEvent(options, processEvent("thinking", `${file.path} の出力を補修`, "説明文が混ざったため、ファイル本文だけを再生成します。", { file: file.path }));
+      block = await singleCodeArtifactCall(model, userText, context, manifest, file, blocks, options);
+    }
+    if (!block) throw new Error(`code_artifact_generation_failed:${file.path}`);
+    blocks.push(block);
+  }
+  return blocks;
+}
+
 function cleanCoderOutput(text) {
   let output = stripThinking(text).trim();
   if (/^(okay|sure|let me|i need|we need|first,|まず|考え)/i.test(output) && output.includes("```")) {
@@ -8411,6 +8580,23 @@ function cleanGeneratedFileContent(content = "") {
   return lines.join("\n").replace(/^\n+|\s+$/g, "");
 }
 
+function generatedFileContentLooksWritable(filePath = "", content = "") {
+  const ext = path.extname(String(filePath || "")).toLowerCase();
+  const value = String(content || "").trim();
+  if (!value) return false;
+  if (/^(?:here(?:'s| is)\b|okay\b|sure\b|let me\b|the user\b|we need\b|i need\b|first,?\s+i\b)/i.test(value)) return false;
+  if (/(?:the user (?:asked|wants)|previous conversation|let me (?:think|draft|check)|i (?:need|should) to|proposed changes:)/i.test(value.slice(0, 2400))) return false;
+  if ([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"].includes(ext)) {
+    return /(?:[{};]|=>|\b(?:import|export|const|let|var|function|class|async|document|window)\b)/.test(value);
+  }
+  if ([".html", ".htm", ".xml", ".svg"].includes(ext)) return /<[^>]+>/.test(value);
+  if ([".css", ".scss", ".sass", ".less"].includes(ext)) return /[{]/.test(value);
+  if (ext === ".json") {
+    try { JSON.parse(value); return true; } catch { return false; }
+  }
+  return true;
+}
+
 function extractGeneratedFileBlocks(text = "") {
   const source = String(text || "");
   const blocks = [];
@@ -8418,6 +8604,7 @@ function extractGeneratedFileBlocks(text = "") {
     const filePath = normalizeGeneratedFilePath(rawPath);
     const content = cleanGeneratedFileContent(rawContent);
     if (!filePath || (operation !== "delete" && !content.trim())) return;
+    if (operation !== "delete" && !generatedFileContentLooksWritable(filePath, content)) return;
     blocks.push({ path: filePath, content, operation });
   };
 
@@ -10442,12 +10629,17 @@ async function implementationRequirementGaps(project, userText = "", result = {}
   }
   const code = chunks.join("\n").toLowerCase();
   const request = String(userText || "").toLowerCase();
+  const wants3DShooter = is3DShooterRequest(userText);
   const checks = [
     { requested: /localstorage|ローカル保存|ブラウザ保存/.test(request), met: /localstorage/.test(code), label: "localStorage persistence" },
     { requested: /検索|search|絞り込/.test(request), met: /search|filter|検索/.test(code), label: "search/filter behavior" },
     { requested: /削除|delete|remove/.test(request), met: /delete|remove|削除/.test(code), label: "delete behavior" },
-    { requested: /追加|create|add/.test(request), met: /add|create|submit|追加/.test(code), label: "create/add behavior" },
-    { requested: /テスト|test/.test(request), met: /\btest\b|describe\s*\(|it\s*\(/.test(code), label: "tests" }
+    { requested: /(?:項目|データ|ユーザー|タスク|投稿).{0,12}(?:追加|作成)|add\s+(?:item|record|user|task|post)/.test(request), met: /add|create|submit|追加/.test(code), label: "create/add behavior" },
+    { requested: /テスト|test/.test(request), met: /\btest\b|describe\s*\(|it\s*\(/.test(code), label: "tests" },
+    { requested: wants3DShooter, met: /three(?:\.module)?(?:\.min)?\.js|from\s+["']three["']|importmap[\s\S]*three/.test(code), label: "3D engine dependency loading" },
+    { requested: wants3DShooter, met: /pointerlock|requestpointerlock|mousemove|pointermove|movementx|camera\.rotation/.test(code) && /keydown|keyup|keyw|keya|keys?\[|\bwasd\b/.test(code), label: "first-person camera controls" },
+    { requested: wants3DShooter, met: /raycaster|projectile|bullet|weapon|shoot|fire|mousedown|pointerdown|click/.test(code), label: "shooting and hit detection" },
+    { requested: wants3DShooter, met: /enemy|enemies|target|opponent/.test(code), label: "enemy or target gameplay" }
   ];
   return checks.filter((check) => check.requested && !check.met).map((check) => check.label);
 }
@@ -10661,6 +10853,8 @@ async function materializeCoderOutput(project, route, model, userText, context, 
   let repaired = false;
   let accumulatedWriteResult = { applied: false, files: [], project };
   let workspaceWasEmpty = true;
+  let segmentedAttempted = false;
+  let segmentedBlocks = [];
   if (project?.workspaceReady) {
     emitProcessEvent(options, processEvent("thinking", "作業フォルダーを確認", project.selectedFolderName || folderNameFromWorkspace(project.workspaceRoot || "") || project.name || "workspace", {
       folderPath: project.workspaceRoot || project.selectedFolderPath || ""
@@ -10677,8 +10871,31 @@ async function materializeCoderOutput(project, route, model, userText, context, 
   emitProcessEvent(options, processEvent("thinking", "作成する構成を決定", describeBuildTarget(userText, route)));
   emitProcessEvent(options, processEvent("thinking", "保存できる形式を準備", "実ファイルとして書き込めるパスと内容に整えています。"));
 
+  const shouldSegmentNewArtifact = AI_CODE_GENERATION_ONLY && project.workspaceReady && workspaceWasEmpty && model &&
+    (route.intent?.taskKind === "code_create" || route.intent?.semanticAction === "create" || isGenericCreateFallbackRequest(userText));
+  if (shouldSegmentNewArtifact) {
+    segmentedAttempted = true;
+    try {
+      const segmented = await generateSegmentedCodeArtifacts(model, project, userText, context, route, {
+        ...options,
+        fallbackModel: options.fallbackModel,
+        onFallback: options.onFallback
+      });
+      if (segmented.length) {
+        segmentedBlocks = segmented;
+        finalCoderOutput = generatedFileBlocksMarkdown(segmented);
+        repaired = true;
+      }
+    } catch (error) {
+      lastError = error.message;
+      emitProcessEvent(options, processEvent("thinking", "ファイル単位生成を再調整", userVisibleWriteIssue(lastError)));
+    }
+  }
+
   for (let attempt = 0; attempt < (AI_CODE_GENERATION_ONLY ? 4 : 2); attempt += 1) {
-    let fileBlocks = project.workspaceReady ? extractGeneratedFileBlocks(finalCoderOutput) : [];
+    let fileBlocks = project.workspaceReady
+      ? (attempt === 0 && segmentedBlocks.length ? segmentedBlocks : extractGeneratedFileBlocks(finalCoderOutput))
+      : [];
     if (!AI_CODE_GENERATION_ONLY && options.forceFreshRebuild && attempt === 0) {
       const fresh = fallbackBlocksForWeakGeneratedBlocks(userText, []);
       if (fresh.blocks.length) {
@@ -10739,20 +10956,22 @@ async function materializeCoderOutput(project, route, model, userText, context, 
           }
           const requirementGaps = await implementationRequirementGaps(project, userText, accumulatedWriteResult);
           if (requirementGaps.length) {
-            lastError = `missing_required_behavior:${requirementGaps.join(",")}`;
+            const criticalRequirementGaps = requirementGaps.filter((gap) => gap === "3D engine dependency loading");
             emitProcessEvent(options, processEvent(
               "thinking",
-              "検証AIが未実装要件を検出",
-              `${requirementGaps.join(", ")} が不足しています。AIへ実装の追加を戻します。`,
-              { requirementGaps }
+              criticalRequirementGaps.length ? "検証AIが実行不能な不足を検出" : "検証AIが改善候補を記録",
+              criticalRequirementGaps.length
+                ? `${criticalRequirementGaps.join(", ")} が不足しています。AIへ実装の追加を戻します。`
+                : `${requirementGaps.join(", ")} は追加改善候補です。構文・起動確認を優先して続行します。`,
+              { requirementGaps, criticalRequirementGaps }
             ));
-            if (model && attempt < 3) {
+            if (criticalRequirementGaps.length && model && attempt < 3) {
               const retry = cleanCoderOutput(await strictCoderRepairCall(
                 model,
                 userText,
                 context,
                 finalCoderOutput,
-                `${lastError}. Emit valid file blocks or a unified diff that implements every missing behavior in the existing generated files.`,
+                `missing_required_behavior:${criticalRequirementGaps.join(",")}. Emit valid file blocks or a unified diff that implements every critical missing behavior in the existing generated files.`,
                 {
                   signal: options.signal,
                   fallbackModel: options.fallbackModel,
@@ -10765,7 +10984,10 @@ async function materializeCoderOutput(project, route, model, userText, context, 
                 continue;
               }
             }
-            throw new Error(lastError);
+            if (criticalRequirementGaps.length) {
+              lastError = `missing_required_behavior:${criticalRequirementGaps.join(",")}`;
+              throw new Error(lastError);
+            }
           }
           writeResult = accumulatedWriteResult;
         }
@@ -10780,6 +11002,29 @@ async function materializeCoderOutput(project, route, model, userText, context, 
         const verification = await verifyWrittenFilesSummary(project, writeResult.files);
         const postWriteChecks = await runPostWriteChecksForFiles(project, writeResult.files, options);
         const checkSummary = postWriteChecksSummary(postWriteChecks);
+        if (!postWriteChecks.ok) {
+          lastError = `post_write_checks_failed:${postWriteChecks.results.filter((result) => !result.ok).map((result) => result.command).join(",") || postWriteChecks.error || "unknown"}`;
+          if (model && attempt < 3) {
+            const retry = cleanCoderOutput(await strictCoderRepairCall(
+              model,
+              userText,
+              context,
+              finalCoderOutput,
+              `${lastError}. Fix the actual syntax or runtime check error. Return only the smallest valid file block or unified diff required to make every check pass.`,
+              {
+                signal: options.signal,
+                fallbackModel: options.fallbackModel,
+                onFallback: options.onFallback
+              }
+            ));
+            if (retry && !retry.startsWith("fallback:") && retry !== finalCoderOutput) {
+              finalCoderOutput = retry;
+              repaired = true;
+              continue;
+            }
+          }
+          throw new Error(lastError);
+        }
         emitProcessEvent(options, codeProcessFinishEvent(writeResult, verification, checkSummary));
         return [
           codeWriteProcessSummary(project, "file-block", writeResult),
@@ -10807,6 +11052,31 @@ async function materializeCoderOutput(project, route, model, userText, context, 
         const verification = await verifyWrittenFilesSummary(project, patchResult.files);
         const postWriteChecks = await runPostWriteChecksForFiles(project, patchResult.files, options);
         const checkSummary = postWriteChecksSummary(postWriteChecks);
+        if (!postWriteChecks.ok) {
+          lastError = `post_write_checks_failed:${postWriteChecks.results.filter((result) => !result.ok).map((result) => result.command).join(",") || postWriteChecks.error || "unknown"}`;
+          const reverted = await rollbackWorkspacePatch(patchResult);
+          emitProcessEvent(options, processEvent("error", "検証に失敗した差分を撤回", `${reverted}件を変更前の状態へ戻しました。`));
+          if (model && attempt < 3) {
+            const retry = cleanCoderOutput(await strictCoderRepairCall(
+              model,
+              userText,
+              context,
+              finalCoderOutput,
+              `${lastError}. Fix the actual syntax or runtime check error. Return only the smallest valid unified diff required to make every check pass.`,
+              {
+                signal: options.signal,
+                fallbackModel: options.fallbackModel,
+                onFallback: options.onFallback
+              }
+            ));
+            if (retry && !retry.startsWith("fallback:") && retry !== finalCoderOutput) {
+              finalCoderOutput = retry;
+              repaired = true;
+              continue;
+            }
+          }
+          throw new Error(lastError);
+        }
         emitProcessEvent(options, codeProcessFinishEvent(patchResult, verification, checkSummary));
         return [
           codeWriteProcessSummary(project, "patch", patchResult),
@@ -10823,6 +11093,25 @@ async function materializeCoderOutput(project, route, model, userText, context, 
     } else {
       lastError = "writable_file_block_or_valid_diff_not_found";
       emitProcessEvent(options, processEvent("thinking", "保存前チェックで問題を検出", "そのままではファイルへ保存できない出力だったため、補修ルートに切り替えます。"));
+      const canSegmentNewArtifact = !segmentedAttempted && attempt === 0 && AI_CODE_GENERATION_ONLY && project.workspaceReady && workspaceWasEmpty &&
+        (route.intent?.taskKind === "code_create" || isGenericCreateFallbackRequest(userText));
+      if (canSegmentNewArtifact && model) {
+        try {
+          const segmented = await generateSegmentedCodeArtifacts(model, project, userText, context, route, {
+            ...options,
+            fallbackModel: options.fallbackModel,
+            onFallback: options.onFallback
+          });
+          if (segmented.length) {
+            finalCoderOutput = generatedFileBlocksMarkdown(segmented);
+            repaired = true;
+            continue;
+          }
+        } catch (error) {
+          lastError = error.message;
+          emitProcessEvent(options, processEvent("thinking", "ファイル単位生成を再調整", userVisibleWriteIssue(lastError)));
+        }
+      }
     }
 
     if (attempt < (AI_CODE_GENERATION_ONLY ? 3 : 1) && model) {
@@ -10878,6 +11167,20 @@ async function materializeCoderOutput(project, route, model, userText, context, 
     return `${finalCoderOutput}\n\nファイルへ直接書き込むには、先に作業フォルダーを選択してください。`;
   }
   if (project.workspaceReady && route.needsCode) {
+    if (AI_CODE_GENERATION_ONLY && workspaceWasEmpty && accumulatedWriteResult.files.length) {
+      const reverted = [];
+      for (const file of accumulatedWriteResult.files) {
+        try {
+          await unlink(projectScopedWorkspacePath(project, file.path));
+          reverted.push(file.path);
+        } catch (error) {
+          if (error.code !== "ENOENT") lastError = `${lastError};rollback_failed:${file.path}`;
+        }
+      }
+      if (reverted.length) {
+        emitProcessEvent(options, processEvent("error", "不完全な生成結果を撤回", `${reverted.length}件を削除し、開始前の空フォルダーへ戻しました。`, { reverted }));
+      }
+    }
     if (AI_CODE_GENERATION_ONLY && options.workspaceRebuild) {
       const restored = await restoreStagedWorkspace(project, options.workspaceRebuild);
       if (restored.length) {
@@ -10980,6 +11283,10 @@ function localResponseQuality(project, userText, finalText, route = {}) {
       score -= 16;
       reasons.push("ignored_selected_workspace");
     }
+    if (/修正が必要|エラーを見つけました|post_write_checks_failed|syntaxerror|チェック失敗/i.test(answer)) {
+      score -= 45;
+      reasons.push("post_write_verification_failed");
+    }
   }
   if (route.intent?.selfImprovement && !/level|lv|賢|自己評価|品質|改善|修正|実装/i.test(answer)) {
     score -= 12;
@@ -11023,7 +11330,9 @@ function localResponseQuality(project, userText, finalText, route = {}) {
   }
   score = Math.max(0, Math.min(100, Math.round(score)));
   const revisionThreshold = asksChatGptLevel ? 94 : route.intent?.selfImprovement ? 92 : route.intent?.isTerse || route.isComplex ? 90 : 82;
-  const canRevise = !route.needsCode || route.intent?.selfImprovement || asksChatGptLevel || route.intent?.videoUnsupported;
+  // Code-mode output is an execution record. A prose quality rewriter must
+  // never replace file-write results or failures with an unrelated chat answer.
+  const canRevise = !route.needsCode;
   return {
     score,
     grade: score >= 92 ? "A" : score >= 82 ? "B" : score >= 70 ? "C" : "D",
@@ -11861,7 +12170,9 @@ async function companyChatStream(req, res) {
 
     const attachments = await storeAttachments(project, body.attachments || []);
     let route = routeCompanyWork(userText);
-    route.intent = analyzeUserIntent(userText, project);
+    // Classify the user's actual message. The semantic execution brief contains
+    // routing metadata and must not be reclassified as a self-improvement task.
+    route.intent = analyzeUserIntent(submittedText, project);
     route.needsCode = route.needsCode || route.intent.needsCode;
     route.needsResearch = route.needsResearch || route.intent.needsResearch;
     route.needsCare = route.needsCare || route.intent.needsCare;
@@ -12251,7 +12562,13 @@ async function companyChatStream(req, res) {
       assistantMessage.content = questionMoved.content;
       if (questionMoved.choiceRequest) assistantMessage.choiceRequest = questionMoved.choiceRequest;
     }
-    let quality = localResponseQuality(project, userText, assistantMessage.content, company.route || route);
+    const qualityRoute = {
+      ...(company.route || {}),
+      ...route,
+      intent: route.intent || company.intent || company.route?.intent,
+      needsCode: Boolean(route.needsCode || company.route?.needsCode)
+    };
+    let quality = localResponseQuality(project, userText, assistantMessage.content, qualityRoute);
     let revisedByQualityGate = false;
     if (quality.needsRevision) {
       const revised = await reviseLowQualityResponse(model, userText, assistantMessage.content, quality, company, {
@@ -12262,7 +12579,7 @@ async function companyChatStream(req, res) {
       if (revised && revised.trim() && revised.trim() !== assistantMessage.content.trim()) {
         assistantMessage.content = revised.trim();
         revisedByQualityGate = true;
-        quality = localResponseQuality(project, userText, assistantMessage.content, company.route || route);
+        quality = localResponseQuality(project, userText, assistantMessage.content, qualityRoute);
       }
     }
     company.intelligence = intelligenceProfile(project, system);
@@ -12271,7 +12588,7 @@ async function companyChatStream(req, res) {
       if (deterministic) {
         assistantMessage.content = deterministic;
         revisedByQualityGate = true;
-        quality = localResponseQuality(project, userText, assistantMessage.content, company.route || route);
+        quality = localResponseQuality(project, userText, assistantMessage.content, qualityRoute);
       }
     }
     assistantMessage.quality = {
