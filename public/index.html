@@ -194,6 +194,22 @@
       </main>
 
       <aside class="workspace-panel" id="workspacePanel" aria-label="出力と情報源">
+        <section class="workspace-card final-objective-card">
+          <div class="workspace-card-tabs" role="tablist" aria-label="プロジェクトの基準">
+            <button class="workspace-card-tab is-active" type="button" role="tab" aria-selected="true">最終目的</button>
+          </div>
+          <p class="final-objective-summary" id="finalObjectiveSummary">まだ設定されていません</p>
+          <textarea class="final-objective-input" id="finalObjectiveInput" rows="5" maxlength="4000" placeholder="例: Three.jsでリアルな3Dシューティングゲームを完成させ、移動・照準・射撃・敵AI・HUD・起動確認まで実装する" hidden></textarea>
+          <div class="final-objective-meta">
+            <small id="finalObjectiveMeta">AIは作業前にここを最初に確認します</small>
+            <div class="final-objective-actions">
+              <button class="panel-action" id="finalObjectiveCancel" type="button" hidden>キャンセル</button>
+              <button class="panel-action primary" id="finalObjectiveEdit" type="button">編集</button>
+              <button class="panel-action primary" id="finalObjectiveSave" type="button" hidden>保存</button>
+            </div>
+          </div>
+        </section>
+
         <section class="workspace-card output-card">
           <h2>出力</h2>
           <div class="workspace-list" id="outputList"></div>

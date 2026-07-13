@@ -190,6 +190,12 @@ const el = {
   taskList: document.querySelector("#taskList"),
   toolStatusList: document.querySelector("#toolStatusList"),
   safetyList: document.querySelector("#safetyList"),
+  finalObjectiveSummary: document.querySelector("#finalObjectiveSummary"),
+  finalObjectiveInput: document.querySelector("#finalObjectiveInput"),
+  finalObjectiveMeta: document.querySelector("#finalObjectiveMeta"),
+  finalObjectiveEdit: document.querySelector("#finalObjectiveEdit"),
+  finalObjectiveSave: document.querySelector("#finalObjectiveSave"),
+  finalObjectiveCancel: document.querySelector("#finalObjectiveCancel"),
   imageToolButton: document.querySelector("#imageToolButton"),
   fileInput: document.querySelector("#fileInput"),
   attachmentTray: document.querySelector("#attachmentTray"),
@@ -1437,6 +1443,7 @@ function renderWorkspacePanel() {
   renderTopBar();
   renderSidebarVitals();
   renderTaskTimeline();
+  renderFinalObjective(project);
 
   if (el.modelPerfList) {
     el.modelPerfList.innerHTML = [
@@ -1562,6 +1569,49 @@ function renderWorkspacePanel() {
       renderMiniItem("workspace-shield-icon", approvalCount ? `${approvalCount} 件の承認待ち` : "承認待ちなし", "approval gate", approvalCount ? "running" : "ready"),
       renderMiniItem("workspace-shield-icon", workspaceReady(project) ? "作業範囲ロック中" : "フォルダー未選択", "workspace scope", workspaceReady(project) ? "ready" : "idle")
     ].join("");
+  }
+}
+
+function projectFinalObjective(project = state.activeProject) {
+  return String(project?.codex?.goal?.text || "").trim();
+}
+
+function renderFinalObjective(project = state.activeProject) {
+  if (!el.finalObjectiveSummary || !el.finalObjectiveInput) return;
+  const objective = projectFinalObjective(project);
+  const editing = !el.finalObjectiveInput.hidden;
+  el.finalObjectiveSummary.textContent = objective || "まだ設定されていません。最初の開発依頼から自動設定するか、ここで入力できます。";
+  el.finalObjectiveSummary.classList.toggle("is-empty", !objective);
+  if (!editing) el.finalObjectiveInput.value = objective;
+  const updatedAt = project?.codex?.goal?.updatedAt;
+  el.finalObjectiveMeta.textContent = objective
+    ? `AIが最初に参照${updatedAt ? ` / ${relativeLabel(updatedAt)}に更新` : ""}`
+    : "AIは作業前にここを最初に確認します";
+}
+
+function setFinalObjectiveEditing(editing) {
+  if (!el.finalObjectiveInput) return;
+  el.finalObjectiveInput.hidden = !editing;
+  el.finalObjectiveSummary.hidden = editing;
+  el.finalObjectiveEdit.hidden = editing;
+  el.finalObjectiveSave.hidden = !editing;
+  el.finalObjectiveCancel.hidden = !editing;
+  if (editing) {
+    el.finalObjectiveInput.value = projectFinalObjective();
+    el.finalObjectiveInput.focus();
+    el.finalObjectiveInput.setSelectionRange(el.finalObjectiveInput.value.length, el.finalObjectiveInput.value.length);
+  }
+}
+
+async function saveFinalObjective() {
+  if (!state.activeProject) return;
+  const objective = el.finalObjectiveInput.value.trim();
+  el.finalObjectiveSave.disabled = true;
+  try {
+    await patchActiveProject({ finalObjective: objective }, objective ? "最終目的を保存しました" : "最終目的を解除しました");
+    setFinalObjectiveEditing(false);
+  } finally {
+    el.finalObjectiveSave.disabled = false;
   }
 }
 
@@ -2856,6 +2906,26 @@ el.projectList.addEventListener("click", (event) => {
   if (!item || state.busy) return;
   state.projectMenuId = "";
   selectProject(item.dataset.projectId);
+});
+
+el.finalObjectiveEdit?.addEventListener("click", () => setFinalObjectiveEditing(true));
+el.finalObjectiveCancel?.addEventListener("click", () => {
+  setFinalObjectiveEditing(false);
+  renderFinalObjective();
+});
+el.finalObjectiveSave?.addEventListener("click", () => {
+  saveFinalObjective().catch((error) => setStatus(`最終目的を保存できませんでした: ${error.message}`));
+});
+el.finalObjectiveInput?.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    saveFinalObjective().catch((error) => setStatus(`最終目的を保存できませんでした: ${error.message}`));
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setFinalObjectiveEditing(false);
+    renderFinalObjective();
+  }
 });
 
 el.projectList.addEventListener("focusout", (event) => {

@@ -1873,6 +1873,42 @@ function normalizeCodexState(project) {
   return project.codex;
 }
 
+function finalObjectiveText(project = null) {
+  const text = String(project?.codex?.goal?.text || "").trim();
+  return text && !blankMemoryText(text) ? clip(text, 4000) : "";
+}
+
+function latestExplicitImplementationRequest(project = null) {
+  const messages = [...(project?.messages || [])].reverse();
+  const candidate = messages.find((message) => {
+    if (message.role !== "user") return false;
+    const text = String(message.content || "").trim();
+    if (!text || isExplicitSafetyApproval(text) || isTerseContinuationRequest(text)) return false;
+    if (/^(?:動かない|動くようにして|動かして|起動しない|起動できるようにして|反応しない|表示されない|エラー|バグ|直して)[よね。.!！\s]*$/i.test(text)) return false;
+    return /(作って|作成|実装|ゲーム|アプリ|サイト|LP|コード|修正|変更|追加|削除|build|create|implement|fix)/i.test(text);
+  });
+  return candidate ? executableRequestFromSafetyPrompt(candidate.content) : "";
+}
+
+function ensureFinalObjective(project, submittedText = "", decision = null) {
+  const codex = normalizeCodexState(project);
+  if (codex.goal.text) return codex.goal.text;
+  const codeActions = new Set(["create", "modify", "debug", "continue", "computer", "command"]);
+  const isCodeWork = decision
+    ? Boolean(decision.needsCode || codeActions.has(decision.action))
+    : normalizeChatMode(project?.mode) !== "chat";
+  if (!isCodeWork) return "";
+  const explicitLooksLikeImplementation = /(作って|作成|実装|ゲーム|アプリ|サイト|LP|コード|修正|変更|追加|削除|build|create|implement|fix)/i.test(submittedText);
+  const explicit = !isTerseContinuationRequest(submittedText) && (decision || explicitLooksLikeImplementation)
+    ? executableRequestFromSafetyPrompt(submittedText)
+    : "";
+  const historical = latestExplicitImplementationRequest(project);
+  const text = clip(explicit || historical || decision?.resolvedRequest || "", 4000);
+  if (!text) return "";
+  codex.goal = { text, status: "active", updatedAt: now() };
+  return text;
+}
+
 function normalizePinnedContext(project) {
   const source = Array.isArray(project.pinnedContext) ? project.pinnedContext : [];
   const seen = new Set();
@@ -1979,7 +2015,8 @@ function projectSummary(project) {
     chatId: project.chatId || project.id,
     projectId: project.projectId || project.id,
     name: project.name,
-    goal: project.goal,
+    goal: codex.goal.text || project.goal,
+    finalObjective: codex.goal.text || "",
     summary: project.summary,
     mode: project.mode || "",
     accessLevel: project.accessLevel || "default",
@@ -4591,11 +4628,13 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
     }
   }
   try {
+    const finalObjective = finalObjectiveText(project);
     const answer = await llmChat(model, [
       {
         role: "system",
         content: [
           "You are Nexa Intent Decision AI. Understand meaning from the whole local conversation and workspace state, not keyword matching. Do not think aloud.",
+          "The project FINAL OBJECTIVE is the highest-priority source of truth. For terse continuation requests, preserve it exactly and never invent a new product, stack, language, framework, or nested project folder.",
           "Return JSON only with this schema:",
           '{"action":"chat|explain|create|modify|debug|continue|research|image|computer|command","continuation":true,"target":"current-workspace|new-artifact|conversation","scope":"small|medium|large","qualityBar":"prototype|standard|production","needsCode":true,"needsResearch":false,"needsInternet":false,"needsComputer":false,"destructive":false,"confidence":0.0,"resolvedRequest":"clear Japanese instruction for the main AI","reason":"short Japanese reason"}.',
           "For short follow-ups such as make it work, improve it, that one, continue, infer the concrete target from the immediately preceding implementation and current workspace.",
@@ -4609,6 +4648,7 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
         role: "user",
         content: [
           `Mode: ${mode || "unselected"}`,
+          `FINAL OBJECTIVE (read first; immutable unless the user explicitly changes it):\n${finalObjective || "not set yet"}`,
           `Workspace:\n${clip(workspace, 1800)}`,
           `Previous implementation goal: ${clip(latestImplementationRequest(project), 700) || "unknown"}`,
           `Recent conversation:\n${recent.map((item) => `${item.role}: ${item.content}`).join("\n") || "none"}`,
@@ -4656,8 +4696,9 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
       /(?:基本構成|最小構成|土台だけ|プロトタイプ|デモ版|ひな形|骨組みだけ)/.test(resolvedRequest);
     if (retriesPreviousWork) {
       resolvedRequest = [
-        `直前の実装目的を最初から再実行する: ${previousGoal}`,
+        `固定された最終目的を継続する: ${previousGoal}`,
         "前回の生成失敗を引き継がず、現在の作業フォルダーを確認して必要な構成を再設計する。",
+        "最終目的に明記されていない技術スタック・言語・フレームワークへ変更せず、選択フォルダーと同名の入れ子フォルダーを作らない。",
         "成果物を実ファイルへ保存し、構文・起動・主要操作を検証して、失敗した箇所は修正後に再検証する。",
         "最小構成や汎用テンプレートへ縮小せず、直前の依頼で要求された品質と規模を維持する。"
       ].join("\n");
@@ -4699,7 +4740,7 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
   }
 }
 
-function semanticExecutionRequest(decision, submittedText) {
+function semanticExecutionRequest(decision, submittedText, project = null) {
   if (!decision?.resolvedRequest) return submittedText;
   const action = {
     create: "新しく実装する",
@@ -4718,7 +4759,8 @@ function semanticExecutionRequest(decision, submittedText) {
     : decision.target === "new-artifact"
       ? "対象は今回新しく作る成果物。"
       : "対象は現在の会話。";
-  return `${target}\n${action}。\n開発規模: ${decision.scope || "medium"}。品質基準: ${decision.qualityBar || "standard"}。\n最新依頼: ${submittedText}\n具体的な完了条件: ${decision.resolvedRequest}`;
+  const objective = finalObjectiveText(project);
+  return `${objective ? `最終目的（最優先・勝手に変更禁止）: ${objective}\n` : ""}${target}\n${action}。\n開発規模: ${decision.scope || "medium"}。品質基準: ${decision.qualityBar || "standard"}。\n最新依頼: ${submittedText}\n具体的な完了条件: ${decision.resolvedRequest}`;
 }
 
 function isProtectedRebuildEntry(name = "") {
@@ -7535,6 +7577,7 @@ function continuationHintFromProject(project = null) {
     .reverse()
     .find((message) => message.role === "assistant" && String(message.content || "").trim());
   return [
+    finalObjectiveText(project) ? `最終目的: ${finalObjectiveText(project)}` : "",
     recentAssistant ? `直前の回答: ${clip(stripThinking(recentAssistant.content || ""), 420)}` : "",
     memory.lastContinuation,
     ...(memory.next || []).slice(-2),
@@ -7548,15 +7591,7 @@ function continuationHintFromProject(project = null) {
 }
 
 function latestImplementationRequest(project = null) {
-  const messages = [...(project?.messages || [])].reverse();
-  const candidate = messages.find((message) => {
-    if (message.role !== "user") return false;
-    const text = String(message.content || "").trim();
-    if (!text || isExplicitSafetyApproval(text) || isTerseContinuationRequest(text)) return false;
-    if (/^(?:動かない|動くようにして|動かして|起動しない|起動できるようにして|反応しない|表示されない|エラー|バグ|直して)[よね。.!！\s]*$/i.test(text)) return false;
-    return /(作って|作成|実装|ゲーム|アプリ|サイト|LP|コード|修正|変更|追加|削除|build|create|implement|fix)/i.test(text);
-  });
-  return candidate ? executableRequestFromSafetyPrompt(candidate.content) : "";
+  return finalObjectiveText(project) || latestExplicitImplementationRequest(project);
 }
 
 function isTerseContinuationRequest(value = "") {
@@ -11320,6 +11355,7 @@ async function structuredCodeAgentActionCall(model, project, userText, context, 
   }
   const nextRequiredFile = missingReferences[0] || missingPlannedFiles[0] || "";
   const prompt = [
+    `FINAL OBJECTIVE (read first; never replace it with a guessed objective):\n${finalObjectiveText(project) || userText}`,
     `Primary request:\n${userText}`,
     `Delivery scope: ${options.scope || "medium"}. Quality bar: ${options.qualityBar || "standard"}.`,
     options.stackPolicy ? `Required stack policy: ${options.stackPolicy}` : "",
@@ -11367,7 +11403,7 @@ async function structuredCodeAgentPlanCall(model, project, userText, stackPolicy
   const overview = await workspaceFolderOverview(project, 3, 220);
   const raw = await llmChat(model, [
     { role: "system", content: "Design a complete implementation file plan. Return JSON only as {\"files\":[{\"path\":\"relative/path\",\"purpose\":\"why required\"}],\"checks\":[\"finite command\"]}. Include all source, configuration, style, focused test, and documentation files needed for a runnable product. Do not include node_modules, dist, build, lockfiles, generated binaries, placeholders, prose, or markdown. Use one coherent real stack." },
-    { role: "user", content: `Request:\n${userText}\n\nRequired stack policy:\n${stackPolicy}\n\nWorkspace overview:\n${clip(overview?.text || "empty", 9000)}\n\nReturn the product-specific file plan now.` }
+    { role: "user", content: `FINAL OBJECTIVE (highest priority; do not substitute another product or stack):\n${finalObjectiveText(project) || userText}\n\nCurrent request:\n${userText}\n\nRequired stack policy:\n${stackPolicy}\n\nWorkspace overview:\n${clip(overview?.text || "empty", 9000)}\n\nPlan paths relative to this workspace root. Never repeat the selected workspace folder name as a nested root. Return the product-specific file plan now.` }
   ], {
     numPredict: 2600,
     temperature: 0.08,
@@ -11389,6 +11425,13 @@ async function structuredCodeAgentPlanCall(model, project, userText, stackPolicy
     .filter((item) => item.path && !/(?:^|\/)(?:node_modules|dist|build)(?:\/|$)|(?:^|\/)package-lock\.json$/i.test(item.path))
     .slice(0, limit);
   return { files, checks: (Array.isArray(parsed?.checks) ? parsed.checks : []).map(String).slice(0, 8) };
+}
+
+function repeatsSelectedWorkspaceRoot(project, relativePath = "") {
+  const root = projectWorkspaceRootPath(project);
+  const rootName = path.basename(root).trim().toLowerCase();
+  const firstSegment = normalizeGeneratedFilePath(relativePath).split("/")[0]?.trim().toLowerCase();
+  return Boolean(rootName && firstSegment && rootName === firstSegment);
 }
 
 async function runStructuredWorkspaceCodeAgent(project, route, model, userText, context, options = {}) {
@@ -11419,7 +11462,8 @@ async function runStructuredWorkspaceCodeAgent(project, route, model, userText, 
   }).catch(() => ({ files: [], checks: [] }));
   const requiredFiles = implementationPlan.files
     .map((file) => file.path)
-    .filter((file) => !(requireWeb3dStack && (/^(?:UnityProject\/)/i.test(file) || /\.cs$/i.test(file))));
+    .filter((file) => !repeatsSelectedWorkspaceRoot(project, file))
+    .filter((file) => !(requireWeb3dStack && (/^(?:UnityProject\/)/i.test(file) || /\.(?:cs|py)$/i.test(file))));
   const journal = [];
   const readPaths = new Set();
   const actionCounts = new Map();
@@ -11498,6 +11542,11 @@ async function runStructuredWorkspaceCodeAgent(project, route, model, userText, 
 
     if (action.action === "read_file") {
       const filePath = normalizeGeneratedFilePath(action.path);
+      if (repeatsSelectedWorkspaceRoot(project, filePath)) {
+        journal.push(`READ REJECTED ${filePath}: paths are already relative to the selected workspace. Remove the duplicate ${path.basename(projectWorkspaceRootPath(project))}/ prefix.`);
+        stalledSteps += 1;
+        continue;
+      }
       if (!filePath) {
         journal.push("READ ERROR: A valid relative file path is required.");
         continue;
@@ -11516,13 +11565,18 @@ async function runStructuredWorkspaceCodeAgent(project, route, model, userText, 
 
     if (action.action === "write_file") {
       const filePath = normalizeGeneratedFilePath(action.path);
+      if (repeatsSelectedWorkspaceRoot(project, filePath)) {
+        journal.push(`WRITE REJECTED ${filePath}: do not create a nested copy of the selected workspace. Write the path relative to its root without the ${path.basename(projectWorkspaceRootPath(project))}/ prefix.`);
+        stalledSteps += 1;
+        continue;
+      }
       if (requireWeb3dStack && /^src\/index\.html$/i.test(filePath)) {
         journal.push(`WRITE REJECTED ${filePath}: Vite requires index.html at the workspace root. Write index.html instead.`);
         stalledSteps += 1;
         continue;
       }
-      if (requireWeb3dStack && (/^(?:UnityProject\/)/i.test(filePath) || /\.cs$/i.test(filePath))) {
-        journal.push(`WRITE REJECTED ${filePath}: The workspace has no Unity metadata. Follow the required Vite + Three.js stack at the workspace root.`);
+      if (requireWeb3dStack && (/^(?:UnityProject\/)/i.test(filePath) || /\.(?:cs|py)$/i.test(filePath))) {
+        journal.push(`WRITE REJECTED ${filePath}: The established stack is Vite + Three.js. Do not drift to Unity, C#, Python, or Pyglet.`);
         stalledSteps += 1;
         continue;
       }
@@ -11557,6 +11611,11 @@ async function runStructuredWorkspaceCodeAgent(project, route, model, userText, 
 
     if (action.action === "delete_file") {
       const filePath = normalizeGeneratedFilePath(action.path);
+      if (repeatsSelectedWorkspaceRoot(project, filePath)) {
+        journal.push(`DELETE REJECTED ${filePath}: paths are already relative to the selected workspace root.`);
+        stalledSteps += 1;
+        continue;
+      }
       if (!filePath) {
         journal.push("DELETE ERROR: A valid relative file path is required.");
         continue;
@@ -13002,9 +13061,11 @@ async function companyChatStream(req, res) {
     if (!resumedSafetyPlan) {
       semanticIntentDecision = await resolveTurnIntentWithAi(project, submittedText, system);
       if (semanticIntentDecision?.confidence >= 0.62 && semanticIntentDecision.resolvedRequest) {
-        semanticIntentDecision.resolvedRequest = semanticExecutionRequest(semanticIntentDecision, submittedText);
+        ensureFinalObjective(project, submittedText, semanticIntentDecision);
+        semanticIntentDecision.resolvedRequest = semanticExecutionRequest(semanticIntentDecision, submittedText, project);
         userText = semanticIntentDecision.resolvedRequest;
       } else {
+        ensureFinalObjective(project, submittedText, semanticIntentDecision);
         codeFollowUpDecision = resolveCodeFollowUpContext(project, submittedText);
         if (codeFollowUpDecision?.effectiveRequest) userText = codeFollowUpDecision.effectiveRequest;
       }
@@ -15114,6 +15175,17 @@ async function route(req, res) {
           project.accessLevel = normalizeAccessLevel(body.accessLevel);
           project.codex = normalizeCodexState(project);
           project.codex.permissions = codexPermissionForAccess(project.accessLevel);
+          changed = true;
+        }
+        if ("finalObjective" in body) {
+          const codex = normalizeCodexState(project);
+          const text = String(body.finalObjective || "").trim().slice(0, 4000);
+          codex.goal = {
+            text,
+            status: text ? "active" : "idle",
+            updatedAt: now()
+          };
+          project.goal = text;
           changed = true;
         }
         if ("selectedFolderPath" in body) {
