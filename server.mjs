@@ -44,6 +44,9 @@ const HOST = process.env.HOST || "0.0.0.0";
 // Templates are legacy-only. Nexa now requires model-authored code unless an
 // operator explicitly opts back into the old emergency fallback.
 const AI_CODE_GENERATION_ONLY = process.env.NEXA_TEMPLATE_FALLBACK !== "true";
+// Default to a Codex-style tool loop: the model performs one structured
+// workspace action at a time instead of composing a giant markdown file dump.
+const CODEX_STYLE_CODE_AGENT = process.env.NEXA_CODE_AGENT_LOOP !== "false";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -361,6 +364,15 @@ function publicModelName(model = "") {
 
 function userVisibleWriteIssue(error = "") {
   const text = String(error || "");
+  if (/structured_code_agent_incomplete/i.test(text)) {
+    return "コードエージェントが実装または検証の完了条件を満たせませんでした。";
+  }
+  if (/structured_code_agent_invalid_json/i.test(text)) {
+    return "コードエージェントの操作形式を解釈できませんでした。";
+  }
+  if (/structured_code_agent_model_failed/i.test(text)) {
+    return "コードモデルが作業操作を生成できませんでした。";
+  }
   if (/writable_file_block_or_valid_diff_not_found|file block|valid diff/i.test(text)) {
     return "保存形式が不安定だったため、自動補完へ切り替えます。";
   }
@@ -4630,7 +4642,13 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
     const qualityBars = new Set(["prototype", "standard", "production"]);
     let resolvedRequest = clip(String(parsed.resolvedRequest || "").trim(), 1600);
     const previousGoal = latestImplementationRequest(project);
-    const retriesPreviousWork = parsed.action === "continue" && isTerseContinuationRequest(submittedText) && previousGoal;
+    const retriesPreviousWork = Boolean(isTerseContinuationRequest(submittedText) && previousGoal);
+    if (retriesPreviousWork) {
+      parsed.action = "continue";
+      parsed.continuation = true;
+      parsed.target = "current-workspace";
+      parsed.needsCode = true;
+    }
     const qualityEvidence = retriesPreviousWork ? `${submittedText}\n${previousGoal}` : submittedText;
     const previousProfile = retriesPreviousWork ? latestSemanticDeliveryProfile(project) : null;
     const userDemandsHighQuality = requestDemandsHighQuality(qualityEvidence);
@@ -10985,7 +11003,11 @@ async function implementationRequirementGaps(project, userText = "", result = {}
     { requested: /削除|delete|remove/.test(request), met: /delete|remove|削除/.test(code), label: "delete behavior" },
     { requested: /(?:項目|データ|ユーザー|タスク|投稿).{0,12}(?:追加|作成)|add\s+(?:item|record|user|task|post)/.test(request), met: /add|create|submit|追加/.test(code), label: "create/add behavior" },
     { requested: /テスト|test/.test(request), met: /\btest\b|describe\s*\(|it\s*\(/.test(code), label: "tests" },
-    { requested: wants3DShooter, met: /three(?:\.module)?(?:\.min)?\.js|from\s+["']three["']|importmap[\s\S]*three|["']three["']\s*:\s*["']|(?:unpkg\.com|cdn\.jsdelivr\.net)[^\s"']*three/i.test(code), label: "3D engine dependency loading" },
+    {
+      requested: wants3DShooter,
+      met: /three(?:\.module)?(?:\.min)?\.js|from\s+["']three["']|importmap[\s\S]*three|["']three["']\s*:\s*["']|(?:unpkg\.com|cdn\.jsdelivr\.net)[^\s"']*three|using\s+unityengine|\bmonobehaviour\b|extends\s+(?:characterbody3d|node3d)|\bgodot\b|@babylonjs|babylon\.js|\bplaycanvas\b|unrealengine/i.test(code),
+      label: "3D engine dependency loading"
+    },
     { requested: wants3DShooter, met: /pointerlock|requestpointerlock|mousemove|pointermove|movementx|camera\.rotation/.test(code) && /keydown|keyup|keyw|keya|keys?\[|\bwasd\b/.test(code), label: "first-person camera controls" },
     { requested: wants3DShooter, met: /raycaster|projectile|bullet|weapon|shoot|fire|mousedown|pointerdown|click/.test(code), label: "shooting and hit detection" },
     { requested: wants3DShooter, met: /enemy|enemies|target|opponent/.test(code), label: "enemy or target gameplay" }
@@ -11194,6 +11216,439 @@ async function maybeUpgradeLandingQuality(project, userText, result, options = {
   ));
   const upgraded = await writeGeneratedFileBlocks(project, premiumLandingFileBlocks(userText));
   return { result: upgraded, upgraded: true };
+}
+
+function parseStructuredCodeAgentAction(value = "") {
+  const source = String(value || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  const start = source.indexOf("{");
+  const end = source.lastIndexOf("}");
+  const candidates = [fenced, source, start >= 0 && end > start ? source.slice(start, end + 1) : ""].filter(Boolean);
+  let parsed = null;
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate);
+      break;
+    } catch {
+      // The next loop turn receives a strict JSON-format correction.
+    }
+  }
+  if (Array.isArray(parsed)) parsed = parsed[0] || null;
+  if (!parsed || typeof parsed !== "object") return null;
+  const toolCall = Array.isArray(parsed.tool_calls) ? parsed.tool_calls[0] : null;
+  if (toolCall?.function) {
+    let args = toolCall.function.arguments || {};
+    if (typeof args === "string") {
+      try { args = JSON.parse(args); } catch { args = {}; }
+    }
+    parsed = { action: toolCall.function.name, ...args };
+  }
+  const namedAction = ["list_files", "read_file", "write_file", "delete_file", "run_command", "finish"]
+    .find((name) => Object.hasOwn(parsed, name));
+  if (namedAction && !parsed.action && !parsed.tool) {
+    const payload = parsed[namedAction];
+    parsed = { action: namedAction, ...(payload && typeof payload === "object" ? payload : {}) };
+  }
+  let parameters = parsed.arguments || parsed.args || parsed.parameters || parsed.input || {};
+  if (typeof parameters === "string") {
+    try { parameters = JSON.parse(parameters); } catch { parameters = {}; }
+  }
+  if (parameters && typeof parameters === "object" && !Array.isArray(parameters)) {
+    parsed = { ...parameters, ...parsed };
+  }
+  const aliases = {
+    write: "write_file",
+    edit: "write_file",
+    create: "write_file",
+    read: "read_file",
+    list: "list_files",
+    tree: "list_files",
+    delete: "delete_file",
+    remove: "delete_file",
+    command: "run_command",
+    shell: "run_command",
+    done: "finish"
+  };
+  const rawAction = String(parsed.action || parsed.tool || parsed.name || "").trim().toLowerCase().replace(/[ -]+/g, "_");
+  const action = aliases[rawAction] || rawAction;
+  const allowed = new Set(["list_files", "read_file", "write_file", "delete_file", "run_command", "finish"]);
+  if (!allowed.has(action)) return null;
+  return {
+    action,
+    path: String(parsed.path || parsed.filePath || parsed.file_path || parsed.filename || "").trim(),
+    content: typeof parsed.content === "string" ? parsed.content : "",
+    command: String(parsed.command || "").trim(),
+    reason: clip(String(parsed.reason || parsed.summary || "").trim(), 600),
+    summary: clip(String(parsed.summary || parsed.reason || "").trim(), 1200)
+  };
+}
+
+function structuredCodeAgentSystemPrompt() {
+  return [
+    "You are Nexa's autonomous workspace coding agent. Work like a tool-using coding assistant, not a chat code generator.",
+    "Return exactly one JSON object and perform exactly one next action per turn. Never return markdown, file fences, diffs, prose, or hidden reasoning.",
+    "Actions:",
+    '{"action":"list_files","reason":"why"}',
+    '{"action":"read_file","path":"relative/path","reason":"why"}',
+    '{"action":"write_file","path":"relative/path","content":"complete file content","reason":"what changed"}',
+    '{"action":"delete_file","path":"relative/path","reason":"why deletion is required"}',
+    '{"action":"run_command","command":"project-scoped command","reason":"what it verifies"}',
+    '{"action":"finish","summary":"what was implemented and verified"}',
+    "All paths are relative to the selected workspace. Never use placeholder paths, absolute paths, TODO-only files, fake tests, invented dependency manifests, or generated binaries.",
+    "Before modifying an existing file, read it. Use write_file with the complete final content. Parent folders are created automatically.",
+    "Choose one coherent real technology stack and use its conventional project files. Do not mix unrelated frameworks or languages.",
+    "For an empty 3D game workspace, prefer a runnable maintained web stack such as Vite plus Three.js unless the user explicitly requests Unity, Godot, Unreal, or another engine.",
+    "A folder merely named UnityProject is not an existing Unity project unless conventional Unity metadata such as Packages/manifest.json and ProjectSettings exists.",
+    "For established domains such as 3D, use the real engine dependency and initialize it in executable source. A JSON file named dependency manifest is not a substitute for a real package or engine manifest.",
+    "Build the requested product, not a generic starter. For large or production work, include maintainable modules, error handling, focused tests, setup/run documentation, and actual verification.",
+    "Use run_command for install, lint, typecheck, test, or build commands when appropriate. Commands run inside the selected workspace only.",
+    "A current workspace overview is supplied in every turn. Use list_files at most once; after that, read an existing file or write the next required file.",
+    "Do not finish until the project is runnable and the latest tool results show that requested behavior and checks are satisfied."
+  ].join("\n");
+}
+
+async function structuredCodeAgentActionCall(model, project, userText, context, journal, changes, step, maxSteps, options = {}) {
+  const overview = await workspaceFolderOverview(project, 3, 220);
+  const missingReferences = changes.files.length ? await missingReferencedWebAssets(project, changes) : [];
+  const missingPlannedFiles = [];
+  for (const file of options.requiredFiles || []) {
+    try {
+      if (!(await stat(projectScopedWorkspacePath(project, file))).isFile()) missingPlannedFiles.push(file);
+    } catch {
+      missingPlannedFiles.push(file);
+    }
+  }
+  const nextRequiredFile = missingReferences[0] || missingPlannedFiles[0] || "";
+  const prompt = [
+    `Primary request:\n${userText}`,
+    `Delivery scope: ${options.scope || "medium"}. Quality bar: ${options.qualityBar || "standard"}.`,
+    options.stackPolicy ? `Required stack policy: ${options.stackPolicy}` : "",
+    `Step: ${step}/${maxSteps}`,
+    `Workspace:\n${clip(overview?.text || "No overview available", 10000)}`,
+    "Coding context policy: Treat the selected workspace and tool results as the source of truth. Do not reproduce internal planning metadata.",
+    `Changed files this run:\n${changes.files.map((file) => `${file.status}: ${file.path}`).join("\n") || "none"}`,
+    `Referenced files still missing:\n${missingReferences.join("\n") || "none"}`,
+    `Planned implementation files still missing:\n${missingPlannedFiles.join("\n") || "none"}`,
+    `Tool journal:\n${journal.slice(-18).map((item, index) => `${index + 1}. ${item}`).join("\n\n") || "No tool actions yet."}`,
+    changes.files.length
+      ? "Continue from the changed files. Do not list the workspace again unless a command changed its structure."
+      : "The workspace overview above is current. If no source files exist, choose write_file now; do not keep listing an empty workspace.",
+    options.forceImplementation
+      ? `PROGRESS GATE: Investigation is complete. Your next action MUST be write_file for ${nextRequiredFile || "a new required runnable project file that has not already been rewritten"}. list_files, read_file, run_command, finish, and prose are forbidden this turn.`
+      : "",
+    "Choose the single best next tool action now. Return JSON only."
+  ].join("\n\n");
+  const raw = await llmChat(model, [
+    { role: "system", content: structuredCodeAgentSystemPrompt() },
+    { role: "user", content: prompt }
+  ], {
+    numPredict: 7000,
+    temperature: 0.06,
+    format: "json",
+    timeout: options.timeout ?? 120000,
+    signal: options.signal,
+    fallbackModel: options.fallbackModel,
+    onFallback: options.onFallback
+  });
+  const action = parseStructuredCodeAgentAction(raw);
+  if (!action) console.warn(`[structured-code-agent] Invalid action response: ${clip(raw, 700)}`);
+  return action;
+}
+
+function structuredAgentCommandAllowed(command = "") {
+  const value = String(command || "").trim();
+  if (!value || value.length > 2000) return false;
+  if (isDangerousShellCommand(value)) return false;
+  if (/^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:dev|start|serve|preview)\b/i.test(value)) return false;
+  return !/(?:^|[;&|])\s*(?:cd|set-location|pushd|popd)\b/i.test(value);
+}
+
+async function structuredCodeAgentPlanCall(model, project, userText, stackPolicy, options = {}) {
+  const overview = await workspaceFolderOverview(project, 3, 220);
+  const raw = await llmChat(model, [
+    { role: "system", content: "Design a complete implementation file plan. Return JSON only as {\"files\":[{\"path\":\"relative/path\",\"purpose\":\"why required\"}],\"checks\":[\"finite command\"]}. Include all source, configuration, style, focused test, and documentation files needed for a runnable product. Do not include node_modules, dist, build, lockfiles, generated binaries, placeholders, prose, or markdown. Use one coherent real stack." },
+    { role: "user", content: `Request:\n${userText}\n\nRequired stack policy:\n${stackPolicy}\n\nWorkspace overview:\n${clip(overview?.text || "empty", 9000)}\n\nReturn the product-specific file plan now.` }
+  ], {
+    numPredict: 2600,
+    temperature: 0.08,
+    format: "json",
+    timeout: options.timeout ?? 120000,
+    signal: options.signal,
+    fallbackModel: options.fallbackModel,
+    onFallback: options.onFallback
+  });
+  let parsed = null;
+  try { parsed = JSON.parse(String(raw || "")); } catch {
+    const match = String(raw || "").match(/\{[\s\S]*\}/);
+    if (match) try { parsed = JSON.parse(match[0]); } catch { parsed = null; }
+  }
+  const limit = options.scope === "large" || options.qualityBar === "production" ? 32 : 16;
+  const files = (Array.isArray(parsed?.files) ? parsed.files : [])
+    .map((item) => typeof item === "string" ? { path: item, purpose: "required by the implementation plan" } : item)
+    .map((item) => ({ path: normalizeGeneratedFilePath(item?.path || item?.filename || ""), purpose: clip(item?.purpose || item?.reason || "required by the implementation plan", 300) }))
+    .filter((item) => item.path && !/(?:^|\/)(?:node_modules|dist|build)(?:\/|$)|(?:^|\/)package-lock\.json$/i.test(item.path))
+    .slice(0, limit);
+  return { files, checks: (Array.isArray(parsed?.checks) ? parsed.checks : []).map(String).slice(0, 8) };
+}
+
+async function runStructuredWorkspaceCodeAgent(project, route, model, userText, context, options = {}) {
+  assertWorkspaceReadyForWrite(project);
+  assertCodexPermission(project, "write");
+  const scope = route?.intent?.semanticScope || "medium";
+  const qualityBar = route?.intent?.qualityBar || "standard";
+  const maxSteps = scope === "large" || qualityBar === "production" ? 48 : 28;
+  const explicitUnity = /(?:^|\W)unity(?:\W|$)/i.test(userText);
+  const threeDimensionalRequest = /3\s*d|three[- ]?dimensional|シューティング|fps|ゲーム/i.test(userText);
+  let hasUnityMetadata = false;
+  for (const rel of ["Packages/manifest.json", "ProjectSettings/ProjectVersion.txt", "UnityProject/Packages/manifest.json", "UnityProject/ProjectSettings/ProjectVersion.txt"]) {
+    try {
+      hasUnityMetadata = (await stat(projectScopedWorkspacePath(project, rel))).isFile();
+      if (hasUnityMetadata) break;
+    } catch {
+      // Missing metadata means a similarly named empty folder is not a Unity project.
+    }
+  }
+  const requireWeb3dStack = threeDimensionalRequest && !explicitUnity && !hasUnityMetadata;
+  const stackPolicy = requireWeb3dStack
+    ? "Use one Vite + Three.js JavaScript project at the workspace root. package.json must include both three and vite, with a build script. Do not use Unity, C#, Godot, Unreal, or write under a merely named UnityProject folder."
+    : "Preserve the real existing framework discovered through workspace files. Do not mix frameworks.";
+  const implementationPlan = await structuredCodeAgentPlanCall(model, project, userText, stackPolicy, {
+    ...options,
+    scope,
+    qualityBar
+  }).catch(() => ({ files: [], checks: [] }));
+  const requiredFiles = implementationPlan.files
+    .map((file) => file.path)
+    .filter((file) => !(requireWeb3dStack && (/^(?:UnityProject\/)/i.test(file) || /\.cs$/i.test(file))));
+  const journal = [];
+  const readPaths = new Set();
+  const actionCounts = new Map();
+  let changes = { applied: false, files: [], project };
+  let malformedCount = 0;
+  let listedWorkspace = false;
+  let stalledSteps = 0;
+  let finishSummary = "";
+  let finalChecks = { ran: false, ok: true, results: [], commands: [] };
+
+  emitProcessEvent(options, processEvent(
+    "thinking",
+    "コードエージェントを開始",
+    "Nexaが作業フォルダーを確認し、読み取り・編集・コマンド・検証を1操作ずつ進めます。"
+  ));
+  if (requiredFiles.length) {
+    emitProcessEvent(options, processEvent("thinking", "実装ファイルを設計", `${requiredFiles.length}件を完了条件として順番に実装します。`, { files: implementationPlan.files }));
+  }
+
+  for (let step = 1; step <= maxSteps; step += 1) {
+    let action = null;
+    const forceImplementation = stalledSteps >= 3;
+    try {
+      action = await structuredCodeAgentActionCall(model, project, userText, context, journal, changes, step, maxSteps, {
+        ...options,
+        scope,
+        qualityBar,
+        forceImplementation,
+        stackPolicy,
+        requiredFiles
+      });
+    } catch (error) {
+      journal.push(`MODEL ERROR: ${error.message}. Retry with one valid JSON tool action.`);
+      stalledSteps += 1;
+      malformedCount += 1;
+      if (malformedCount >= 4) throw new Error(`structured_code_agent_model_failed:${error.message}`);
+      continue;
+    }
+    if (!action) {
+      journal.push("FORMAT ERROR: Return one JSON object using a documented tool action. Do not return prose or markdown.");
+      stalledSteps += 1;
+      malformedCount += 1;
+      if (malformedCount >= 4) throw new Error("structured_code_agent_invalid_json");
+      continue;
+    }
+    malformedCount = 0;
+    if (forceImplementation && action.action !== "write_file") {
+      journal.push("PROGRESS REJECTED: The investigation budget is exhausted. The next action must write a required runnable project file.");
+      stalledSteps += 1;
+      continue;
+    }
+    const signature = action.action === "list_files"
+      ? "list_files"
+      : `${action.action}:${action.path || action.command || (action.action === "finish" ? "finish" : "")}`;
+    const repeated = (actionCounts.get(signature) || 0) + 1;
+    actionCounts.set(signature, repeated);
+    if (repeated > 2 && action.action !== "finish") {
+      journal.push(`REJECTED repeated action: ${signature}. Choose a different action based on the previous result.`);
+      stalledSteps += 1;
+      continue;
+    }
+
+    if (action.action === "list_files") {
+      if (listedWorkspace) {
+        journal.push("LIST REJECTED: The current workspace overview is already available. Choose read_file for an existing source file or write_file for the next required file.");
+        stalledSteps += 1;
+        continue;
+      }
+      const overview = await workspaceFolderOverview(project, 4, 320);
+      listedWorkspace = true;
+      stalledSteps += 1;
+      journal.push(`LIST RESULT:\n${clip(overview?.text || "Workspace could not be listed.", 12000)}`);
+      emitProcessEvent(options, processEvent("thinking", "作業フォルダーを調査", action.reason || "現在のファイル構成を確認しました。"));
+      continue;
+    }
+
+    if (action.action === "read_file") {
+      const filePath = normalizeGeneratedFilePath(action.path);
+      if (!filePath) {
+        journal.push("READ ERROR: A valid relative file path is required.");
+        continue;
+      }
+      try {
+        const file = await workspaceFile(filePath, project);
+        readPaths.add(filePath);
+        stalledSteps += 1;
+        journal.push(`READ RESULT ${filePath} (${file.size} bytes):\n${clip(file.content, 16000)}`);
+        emitProcessEvent(options, processEvent("thinking", `${filePath} を確認`, action.reason || `${file.size} bytes を読み取りました。`, { file: filePath }));
+      } catch (error) {
+        journal.push(`READ ERROR ${filePath}: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (action.action === "write_file") {
+      const filePath = normalizeGeneratedFilePath(action.path);
+      if (requireWeb3dStack && /^src\/index\.html$/i.test(filePath)) {
+        journal.push(`WRITE REJECTED ${filePath}: Vite requires index.html at the workspace root. Write index.html instead.`);
+        stalledSteps += 1;
+        continue;
+      }
+      if (requireWeb3dStack && (/^(?:UnityProject\/)/i.test(filePath) || /\.cs$/i.test(filePath))) {
+        journal.push(`WRITE REJECTED ${filePath}: The workspace has no Unity metadata. Follow the required Vite + Three.js stack at the workspace root.`);
+        stalledSteps += 1;
+        continue;
+      }
+      if (!filePath || !generatedFileContentLooksWritable(filePath, action.content)) {
+        journal.push(`WRITE ERROR ${action.path || "(missing path)"}: valid relative path and complete non-empty source are required.`);
+        continue;
+      }
+      let exists = false;
+      try {
+        const fileStat = await stat(projectScopedWorkspacePath(project, filePath));
+        exists = fileStat.isFile();
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      if (exists && !readPaths.has(filePath)) {
+        journal.push(`WRITE REJECTED ${filePath}: read the existing file before replacing it.`);
+        continue;
+      }
+      try {
+        const result = await writeGeneratedFileBlocks(project, [{ path: filePath, content: action.content, operation: "write" }]);
+        changes = mergeWriteResults(changes, result);
+        stalledSteps = 0;
+        readPaths.add(filePath);
+        for (const event of codeProcessFileEvents(result, userText)) emitProcessEvent(options, event);
+        const file = result.files[0];
+        journal.push(`WRITE OK ${filePath}: ${file.status}, ${file.afterSize} bytes. ${action.reason}`);
+      } catch (error) {
+        journal.push(`WRITE ERROR ${filePath}: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (action.action === "delete_file") {
+      const filePath = normalizeGeneratedFilePath(action.path);
+      if (!filePath) {
+        journal.push("DELETE ERROR: A valid relative file path is required.");
+        continue;
+      }
+      try {
+        const result = await writeGeneratedFileBlocks(project, [{ path: filePath, content: "", operation: "delete" }]);
+        changes = mergeWriteResults(changes, result);
+        stalledSteps = 0;
+        emitProcessEvent(options, processEvent("edit", `${filePath} を削除`, action.reason || "不要なファイルを削除しました。", { file: filePath }));
+        journal.push(`DELETE OK ${filePath}: ${action.reason}`);
+      } catch (error) {
+        journal.push(`DELETE ERROR ${filePath}: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (action.action === "run_command") {
+      if (requireWeb3dStack && /(?:^|\s)unity(?:\s|$)/i.test(action.command)) {
+        journal.push(`COMMAND REJECTED: ${action.command}. Unity is not installed or established in this workspace; follow the required Vite + Three.js stack.`);
+        stalledSteps += 1;
+        continue;
+      }
+      if (/^\s*(?:vite|tsc|eslint|jest|vitest)\b/i.test(action.command)) {
+        journal.push(`COMMAND REJECTED: ${action.command}. Use package scripts such as npm run build/test so local project dependencies are resolved.`);
+        stalledSteps += 1;
+        continue;
+      }
+      if (!structuredAgentCommandAllowed(action.command)) {
+        journal.push(`COMMAND REJECTED: ${action.command || "missing command"}. Use a non-destructive project-scoped install/build/test command.`);
+        continue;
+      }
+      try {
+        assertShellSafety(project, action.command, "shell");
+        emitProcessEvent(options, processEvent("command", "コマンドを実行", action.command, { commands: [action.command] }));
+        const result = await runShellCommand(action.command, 90000, projectWorkspaceRootPath(project));
+        stalledSteps += 1;
+        journal.push(`COMMAND ${result.ok ? "OK" : "FAILED"}: ${action.command}\nexit=${result.exitCode}\n${clip(result.stderr || result.stdout, 10000)}`);
+        emitProcessEvent(options, processEvent(result.ok ? "done" : "error", result.ok ? "コマンドが完了" : "コマンドで問題を検出", `${action.command}\n${clip(result.stderr || result.stdout, 1200)}`, { result }));
+      } catch (error) {
+        journal.push(`COMMAND ERROR ${action.command}: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (action.action === "finish") {
+      if (!changes.files.length) {
+        journal.push("FINISH REJECTED: No files were created, edited, or deleted for this coding request.");
+        continue;
+      }
+      const requirementGaps = await implementationRequirementGaps(project, userText, changes);
+      for (const file of requiredFiles) {
+        try {
+          if (!(await stat(projectScopedWorkspacePath(project, file))).isFile()) requirementGaps.push(`planned file: ${file}`);
+        } catch {
+          requirementGaps.push(`planned file: ${file}`);
+        }
+      }
+      if (requirementGaps.length) {
+        journal.push(`FINISH REJECTED: Missing requested behavior: ${requirementGaps.join(", ")}. Inspect and edit the real implementation, then verify again.`);
+        emitProcessEvent(options, processEvent("thinking", "不足している実装を検出", requirementGaps.join(", "), { requirementGaps }));
+        continue;
+      }
+      finalChecks = await runPostWriteChecksForFiles(project, changes.files, options);
+      if (!finalChecks.ok) {
+        journal.push(`FINISH REJECTED: Checks failed.\n${postWriteChecksSummary(finalChecks)}\nRead the failing files, fix them, and rerun the relevant command.`);
+        continue;
+      }
+      finishSummary = action.summary || "実装と検証が完了しました。";
+      break;
+    }
+  }
+
+  if (!finishSummary) {
+    const requirementGaps = changes.files.length ? await implementationRequirementGaps(project, userText, changes) : ["no files changed"];
+    finalChecks = changes.files.length ? await runPostWriteChecksForFiles(project, changes.files, options) : { ran: false, ok: false, results: [], commands: [] };
+    if (options.workspaceRebuild) {
+      for (const file of changes.files.filter((item) => item.status === "added")) {
+        await unlink(projectScopedWorkspacePath(project, file.path)).catch(() => {});
+      }
+      await restoreStagedWorkspace(project, options.workspaceRebuild);
+    }
+    throw new Error(`structured_code_agent_incomplete:${requirementGaps.join(",") || "finish_not_reached"}${finalChecks.ok ? "" : ":checks_failed"}`);
+  }
+
+  const verification = await verifyWrittenFilesSummary(project, changes.files);
+  emitProcessEvent(options, codeProcessFinishEvent(changes, verification, postWriteChecksSummary(finalChecks)));
+  return [
+    finishSummary,
+    codeWriteProcessSummary(project, "file-block", changes),
+    verification,
+    postWriteChecksSummary(finalChecks)
+  ].filter(Boolean).join("\n\n");
 }
 
 async function materializeCoderOutput(project, route, model, userText, context, coderOutput, options = {}) {
@@ -11794,7 +12249,7 @@ function keywordSpecialistAgent(intent = {}, userText = "") {
     id: `keyword:${kind}`,
     name: `Nexa ${label}`,
     model: "intent-specialist-router",
-    output: `キーワードと意図を ${kind} と判定し、${label}AIを実行チームへ追加しました。対象: ${clip(userText, 180)}`,
+    output: `会話全体の意味と文脈を ${kind} と判定し、${label}AIを実行チームへ追加しました。対象: ${clip(userText, 180)}`,
     error: ""
   };
 }
@@ -11851,7 +12306,7 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     `User request:\n${userText}`,
     `Media policy:\n${IMAGE_GENERATION_ONLY ? "Image generation only. Video generation is intentionally disabled; never claim a video was created." : "Image and video generation may be available."}`,
     `Selected workspace folder:\n${workspaceSelection}`,
-    `Workspace write scope:\n${project.workspaceReady ? "Write only inside the selected folder. Prefer direct file blocks for new files and valid diffs for edits." : "No selected folder; do not claim files were written."}`,
+    `Workspace write scope:\n${project.workspaceReady ? (CODEX_STYLE_CODE_AGENT ? "Write only inside the selected folder through structured workspace tools. Inspect existing files before editing and verify the result." : "Write only inside the selected folder. Prefer direct file blocks for new files and valid diffs for edits.") : "No selected folder; do not claim files were written."}`,
     `Recent chat:\n${history.map((message) => `${message.role}: ${clip(message.content, 700)}`).join("\n") || "none"}`,
     `Project memory:\n${projectMemoryText(project)}`,
     `Relevant memory:\n${relevantMemory}`,
@@ -11947,7 +12402,7 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     : "会話回答ルートで進めます。");
 
   emit(agentItem("toolRouter", project.workspaceReady
-    ? `Nexa may write direct file blocks or valid patches inside: ${workspaceSelection}`
+    ? `Nexa may use structured read, write, delete, command, and verify tools inside: ${workspaceSelection}`
     : "No workspace folder is selected yet; code can be drafted, but file writes should wait."));
 
   emitStep("thinking", "作業範囲を確認", project.workspaceReady ? workspaceSelection : "フォルダー未選択。必要な場合はコード作業前に選択します。");
@@ -11995,8 +12450,8 @@ async function runCompanyAgents(project, userText, history, system, send, attach
   }
 
   if (route.needsCode && codeModel) {
-    emitStep("thinking", "保存するコードを生成", project.workspaceReady
-      ? `選択フォルダーへ直接保存できる file ブロックまたは差分を作ります。想定ファイル: ${requestedFilesForLog}`
+    emitStep("thinking", "コード作業を開始", project.workspaceReady
+      ? `選択フォルダーを調査し、必要なファイル操作と検証を順番に実行します。想定ファイル: ${requestedFilesForLog}`
       : `フォルダー未選択のため、保存可能なコード案だけ準備します。想定ファイル: ${requestedFilesForLog}`);
     if (useDirectArtifactPipeline) {
       emit(agentItem("coder", "The direct artifact pipeline will plan architecture and generate each file independently inside the selected workspace.", codeModel));
@@ -12279,9 +12734,12 @@ async function simpleChatStream(req, res) {
         send("assistant-delta", { id: assistantMessage.id, delta: visible });
       }
     } catch (error) {
-      const fallback = model
-        ? `AIモデルとの通信で問題が起きました: ${error.message}`
-        : "会話モデルが見つかりません。Ollamaを起動するか、クラウドAPIキーを設定するとチャットできます。";
+      const structuredFailure = /^structured_code_agent_/i.test(String(error?.message || ""));
+      const fallback = structuredFailure
+        ? `コード作業を完了できませんでした: ${userVisibleWriteIssue(error.message)}`
+        : model
+          ? `AIモデルとの通信で問題が起きました: ${error.message}`
+          : "会話モデルが見つかりません。Ollamaを起動するか、クラウドAPIキーを設定するとチャットできます。";
       assistantMessage.content = fallback;
       send("assistant-delta", { id: assistantMessage.id, delta: fallback });
     }
@@ -12914,26 +13372,36 @@ async function companyChatStream(req, res) {
         const hasWritableCoderDraft = Boolean(coderOutput && !coderOutput.startsWith("fallback:"));
         const canUseDirectWorkspacePipeline = Boolean(route.needsCode && project.workspaceReady && model);
         if (forceFreshRebuild || forceContextRepair || hasWritableCoderDraft || canUseDirectWorkspacePipeline) {
-          const finalCoderOutput = await materializeCoderOutput(
-            project,
-            route,
-            model,
-            userText,
-            company.context || "",
-            coderOutput,
-            {
-              signal: abortController.signal,
-              processEvents: assistantMessage.processEvents,
-              send,
-              messageId: assistantMessage.id,
-              fallbackModel: company.fallbackModel,
-              plannerModel: system.plan?.fast || company.fallbackModel || model,
-              formatterModel: system.plan?.fast || company.fallbackModel || model,
-              forceFreshRebuild: forceFreshRebuild || forceContextRepair,
-              workspaceRebuild: assistantMessage.workspaceRebuild || null,
-              onFallback: onStreamFallback
-            }
-          );
+          const codeAgentOptions = {
+            signal: abortController.signal,
+            processEvents: assistantMessage.processEvents,
+            send,
+            messageId: assistantMessage.id,
+            fallbackModel: company.fallbackModel,
+            plannerModel: system.plan?.fast || company.fallbackModel || model,
+            formatterModel: system.plan?.fast || company.fallbackModel || model,
+            forceFreshRebuild: forceFreshRebuild || forceContextRepair,
+            workspaceRebuild: assistantMessage.workspaceRebuild || null,
+            onFallback: onStreamFallback
+          };
+          const finalCoderOutput = CODEX_STYLE_CODE_AGENT && canUseDirectWorkspacePipeline
+            ? await runStructuredWorkspaceCodeAgent(
+              project,
+              route,
+              model,
+              userText,
+              company.context || "",
+              codeAgentOptions
+            )
+            : await materializeCoderOutput(
+              project,
+              route,
+              model,
+              userText,
+              company.context || "",
+              coderOutput,
+              codeAgentOptions
+            );
           assistantMessage.content = finalCoderOutput;
           send("assistant-delta", { id: assistantMessage.id, delta: assistantMessage.content });
         } else {
@@ -12957,9 +13425,12 @@ async function companyChatStream(req, res) {
         }
       }
     } catch (error) {
-      const fallback = model
-        ? `AIモデルとの通信で問題が起きました: ${error.message}`
-        : "会話モデルが見つかりません。Ollamaを起動するか、クラウドAPIキーを設定するとチャットできます。";
+      const structuredFailure = /^structured_code_agent_/i.test(String(error?.message || ""));
+      const fallback = structuredFailure
+        ? `コード作業を完了できませんでした: ${userVisibleWriteIssue(error.message)}`
+        : model
+          ? `AIモデルとの通信で問題が起きました: ${error.message}`
+          : "会話モデルが見つかりません。Ollamaを起動するか、クラウドAPIキーを設定するとチャットできます。";
       assistantMessage.content = fallback;
       send("assistant-delta", { id: assistantMessage.id, delta: fallback });
     }
