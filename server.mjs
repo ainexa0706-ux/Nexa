@@ -1562,8 +1562,8 @@ async function pickLocalFolderDialog() {
   ].join("; ");
 
   return new Promise((resolve, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-STA", "-WindowStyle", "Normal", "-ExecutionPolicy", "Bypass", "-Command", script], {
-      windowsHide: false,
+    const child = spawn("powershell.exe", ["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      windowsHide: true,
       shell: false
     });
     let stdout = "";
