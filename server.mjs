@@ -2554,6 +2554,7 @@ async function ollamaChat(model, messages, options = {}) {
       messages,
       stream: false,
       think: false,
+      ...(options.format ? { format: options.format } : {}),
       options: {
         temperature: options.temperature ?? 0.35,
         num_predict: options.numPredict ?? 650
@@ -2582,7 +2583,8 @@ async function openAiChatCompletion(model, messages, options = {}) {
       messages,
       stream: false,
       temperature: options.temperature ?? 0.35,
-      max_tokens: options.numPredict ?? 900
+      max_tokens: options.numPredict ?? 900,
+      ...(options.format === "json" ? { response_format: { type: "json_object" } } : {})
     }),
     signal: combinedAbortSignal(options.timeout ?? 120000, options.signal)
   });
@@ -3434,7 +3436,11 @@ async function writeWorkspaceFile(body) {
 function patchPath(value) {
   const raw = String(value || "").trim().split(/\s+/)[0];
   if (!raw || raw === "/dev/null") return "";
-  return raw.replace(/^[ab]\//, "").replace(/^\.?\//, "");
+  const withoutGitPrefix = raw.replace(/^[ab]\//, "");
+  if (/^[a-z]:[\\/]/i.test(withoutGitPrefix) || withoutGitPrefix.startsWith("/") || withoutGitPrefix.split(/[\\/]/).includes("..")) {
+    throw new Error("workspace_patch_relative_path_required");
+  }
+  return withoutGitPrefix.replace(/^\.\//, "");
 }
 
 function parseUnifiedPatch(patchText) {
@@ -3503,7 +3509,16 @@ function parseUnifiedPatch(patchText) {
       file.hunks.push(hunk);
     }
 
-    if (file.hunks.length) files.push(file);
+    if (file.hunks.length) {
+      for (const hunk of file.hunks) {
+        const actualOldCount = hunk.lines.filter((line) => line.type === " " || line.type === "-").length;
+        const actualNewCount = hunk.lines.filter((line) => line.type === " " || line.type === "+").length;
+        if (actualOldCount !== hunk.oldCount || actualNewCount !== hunk.newCount) {
+          throw new Error("workspace_patch_hunk_count_mismatch");
+        }
+      }
+      files.push(file);
+    }
   }
 
   if (!files.length) throw new Error("workspace_patch_empty");
@@ -3615,6 +3630,7 @@ async function workspacePatch(body) {
     }
 
     const after = applyHunksToText(before, filePatch);
+    if (body.requireNonEmpty === true && !after.trim()) throw new Error("workspace_patch_empty_generated_file");
     const status = exists ? "modified" : "added";
     const result = {
       path: relPath,
@@ -4569,10 +4585,12 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
         content: [
           "You are Nexa Intent Decision AI. Understand meaning from the whole local conversation and workspace state, not keyword matching. Do not think aloud.",
           "Return JSON only with this schema:",
-          '{"action":"chat|explain|create|modify|debug|continue|research|image|computer|command","continuation":true,"target":"current-workspace|new-artifact|conversation","needsCode":true,"needsResearch":false,"needsInternet":false,"needsComputer":false,"destructive":false,"confidence":0.0,"resolvedRequest":"clear Japanese instruction for the main AI","reason":"short Japanese reason"}.',
+          '{"action":"chat|explain|create|modify|debug|continue|research|image|computer|command","continuation":true,"target":"current-workspace|new-artifact|conversation","scope":"small|medium|large","qualityBar":"prototype|standard|production","needsCode":true,"needsResearch":false,"needsInternet":false,"needsComputer":false,"destructive":false,"confidence":0.0,"resolvedRequest":"clear Japanese instruction for the main AI","reason":"short Japanese reason"}.',
           "For short follow-ups such as make it work, improve it, that one, continue, infer the concrete target from the immediately preceding implementation and current workspace.",
           "Never turn an existing-app repair into a generic new web app. Never infer destructive permission merely from an app feature named delete.",
-          "resolvedRequest must preserve the user's latest intent and tell the main AI what outcome to achieve, not how to fake success."
+          "Judge scope from the product surface, number of subsystems, integrations, persistence, security, and testing needs rather than message length.",
+          "Preserve the user's ambition. Never rewrite realistic, production-ready, full, large-scale, or high-quality work as basic, minimal, demo, prototype, starter, or mere structure.",
+          "resolvedRequest must preserve the user's latest intent and tell the main AI concrete observable acceptance criteria, not how to fake success."
         ].join(" ")
       },
       {
@@ -4588,6 +4606,7 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
     ], {
       temperature: 0,
       numPredict: 320,
+      format: "json",
       timeout: 30000,
       fallbackModel: localFallbackForKind(system, "conversation")
     });
@@ -4607,17 +4626,31 @@ async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
     const actions = new Set(["chat", "explain", "create", "modify", "debug", "continue", "research", "image", "computer", "command"]);
     const targets = new Set(["current-workspace", "new-artifact", "conversation"]);
     if (!actions.has(parsed.action) || !targets.has(parsed.target)) return null;
+    const scopes = new Set(["small", "medium", "large"]);
+    const qualityBars = new Set(["prototype", "standard", "production"]);
+    let resolvedRequest = clip(String(parsed.resolvedRequest || "").trim(), 1600);
+    const userDemandsHighQuality = /\b(?:realistic|production(?:-ready)?|high[- ]quality|large[- ]scale|enterprise|complete|full)\b/i.test(submittedText) ||
+      /(?:リアル|本格|高品質|大規模|完成版|製品版|本番品質|作り込)/.test(submittedText);
+    const resolutionDowngradesQuality = /\b(?:basic|minimal|demo|prototype|starter|skeleton|structure only)\b/i.test(resolvedRequest) ||
+      /(?:基本構成|最小構成|土台だけ|プロトタイプ|デモ版)/.test(resolvedRequest);
+    if (userDemandsHighQuality && resolutionDowngradesQuality) {
+      resolvedRequest = `${submittedText}。要求を基本構成やデモへ縮小せず、操作可能性・主要機能・エラー処理・検証まで含む完成度の高い成果物として実装する。`;
+    }
     return {
       action: parsed.action,
       continuation: Boolean(parsed.continuation),
       target: parsed.target,
+      scope: scopes.has(parsed.scope) ? parsed.scope : "medium",
+      qualityBar: userDemandsHighQuality
+        ? "production"
+        : (qualityBars.has(parsed.qualityBar) ? parsed.qualityBar : "standard"),
       needsCode: Boolean(parsed.needsCode),
       needsResearch: Boolean(parsed.needsResearch),
       needsInternet: Boolean(parsed.needsInternet),
       needsComputer: Boolean(parsed.needsComputer),
       destructive: Boolean(parsed.destructive),
       confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
-      resolvedRequest: clip(String(parsed.resolvedRequest || "").trim(), 1600),
+      resolvedRequest,
       reason: clip(String(parsed.reason || "").trim(), 320),
       model: publicModelName(model),
       source: "semantic-intent-ai"
@@ -4646,7 +4679,7 @@ function semanticExecutionRequest(decision, submittedText) {
     : decision.target === "new-artifact"
       ? "対象は今回新しく作る成果物。"
       : "対象は現在の会話。";
-  return `${target}\n${action}。\n最新依頼: ${submittedText}\n具体的な完了条件: ${decision.resolvedRequest}`;
+  return `${target}\n${action}。\n開発規模: ${decision.scope || "medium"}。品質基準: ${decision.qualityBar || "standard"}。\n最新依頼: ${submittedText}\n具体的な完了条件: ${decision.resolvedRequest}`;
 }
 
 function isProtectedRebuildEntry(name = "") {
@@ -4717,6 +4750,10 @@ async function restoreStagedWorkspace(project, staged = {}) {
 
 function expectedFilesForLog(userText = "", route = {}) {
   if (route?.intent?.failureFollowUp || /動くように|動かして|起動できるように|正常に動作/i.test(String(userText || ""))) return [];
+  if (route?.intent?.semanticAction === "create") {
+    const explicitFiles = inferRequestedFiles(userText);
+    return explicitFiles.length ? explicitFiles : ["必要なファイル"];
+  }
   if (is3DShooterRequest(userText)) return ["index.html", "style.css", "app.js", "README.md"];
   if (isGameFallbackRequest(userText)) return ["index.html", "style.css", "app.js"];
   const requested = inferRequestedFiles(userText);
@@ -8396,10 +8433,22 @@ async function strictCoderRepairCall(model, userText, context, previousOutput, f
 function parseCodeArtifactManifest(text = "", fallbackPaths = [], userText = "") {
   const source = stripThinking(String(text || "")).trim();
   let parsed = null;
+  const fencedJson = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
   const jsonStart = source.indexOf("{");
   const jsonEnd = source.lastIndexOf("}");
-  if (jsonStart >= 0 && jsonEnd > jsonStart) {
-    try { parsed = JSON.parse(source.slice(jsonStart, jsonEnd + 1)); } catch { parsed = null; }
+  const jsonCandidates = [
+    fencedJson,
+    jsonStart >= 0 && jsonEnd > jsonStart ? source.slice(jsonStart, jsonEnd + 1) : "",
+    source
+  ].filter(Boolean);
+  for (const candidate of jsonCandidates) {
+    try {
+      parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) parsed = { files: parsed };
+      break;
+    } catch {
+      // A strict retry and a path-field recovery pass are available below.
+    }
   }
   const candidates = Array.isArray(parsed?.files) ? parsed.files : [];
   const files = [];
@@ -8414,20 +8463,45 @@ function parseCodeArtifactManifest(text = "", fallbackPaths = [], userText = "")
     if (typeof item === "string") add(item);
     else add(item?.path, item?.purpose);
   }
-  for (const filePath of fallbackPaths) add(filePath);
-  return files.slice(0, 40);
+  if (!files.length) {
+    const pathField = /["']path["']\s*:\s*["']([^"']+)["']/gi;
+    let match;
+    while ((match = pathField.exec(source))) add(match[1]);
+  }
+  if (!files.length) {
+    for (const filePath of fallbackPaths) add(filePath);
+  }
+  return files.slice(0, 64);
+}
+
+function artifactManifestGaps(files = [], qualityBar = "standard") {
+  const paths = files.map((file) => String(file.path || "").toLowerCase());
+  const gaps = [];
+  const hasRuntimeEntry = paths.some((filePath) =>
+    /(?:^|\/)(?:index\.html|package\.json|pyproject\.toml|requirements\.txt|cargo\.toml|go\.mod|project\.godot|[^/]+\.(?:csproj|sln))$/.test(filePath) ||
+    /(?:^|\/)(?:main|app|server|program)\.(?:js|mjs|cjs|ts|tsx|py|cs|go|rs|java|kt)$/.test(filePath)
+  );
+  if (!hasRuntimeEntry) gaps.push("runnable entry point or project configuration");
+  if (qualityBar === "production") {
+    if (!paths.some((filePath) => /(?:^|\/)(?:test|tests|__tests__)(?:\/|\.)|\.(?:test|spec)\./.test(filePath))) gaps.push("focused tests");
+    if (!paths.some((filePath) => /(?:^|\/)readme(?:\.[^/]+)?$/.test(filePath))) gaps.push("setup and run documentation");
+  }
+  return gaps;
 }
 
 async function codeArtifactManifestCall(model, userText, context, fallbackPaths = [], options = {}) {
   if (!model) return [];
-  const raw = await llmChat(model, [
+  const planningModel = options.plannerModel || model;
+  const plannerMessages = [
     {
       role: "system",
       content: [
         "You are Nexa's code artifact planner.",
-        "Return one JSON object only: {\"files\":[{\"path\":\"relative/path.ext\",\"purpose\":\"...\"}]}",
+        "Return one JSON object only: {\"stack\":\"...\",\"architecture\":\"...\",\"acceptanceCriteria\":[\"...\"],\"files\":[{\"path\":\"relative/path.ext\",\"purpose\":\"...\"}]}",
         "Choose every text file needed for a complete runnable implementation. There is no three-file limit.",
         "Use the repository framework when one exists. For an empty folder, choose a conventional maintainable structure.",
+        "Plan the real product surface: runtime entry points, domain modules, state or persistence, assets/configuration, error handling, tests, and runnable scripts when relevant.",
+        "Do not reduce a production or large request to a basic demo. Prefer a proven domain engine or framework when the task has established physics, rendering, parsing, or protocol rules.",
         "Paths must be real relative paths. Do not include prose, markdown, absolute paths, placeholders, generated binaries, secrets, node_modules, build output, or lock files."
       ].join(" ")
     },
@@ -8435,28 +8509,129 @@ async function codeArtifactManifestCall(model, userText, context, fallbackPaths 
       role: "user",
       content: [
         `Primary request:\n${userText}`,
+        `Delivery scope: ${options.scope || "medium"}. Quality bar: ${options.qualityBar || "standard"}.`,
         `Likely files (use only when appropriate):\n${fallbackPaths.join("\n") || "none"}`,
         `Workspace evidence:\n${clip(context, 9000)}`
       ].join("\n\n")
     }
-  ], {
+  ];
+  let raw = await llmChat(planningModel, plannerMessages, {
     numPredict: 1400,
     temperature: 0.08,
+    format: "json",
     timeout: options.timeout ?? 90000,
     signal: options.signal,
     fallbackModel: options.fallbackModel,
     onFallback: options.onFallback
   });
-  return parseCodeArtifactManifest(raw, fallbackPaths, userText);
+  let draft = parseCodeArtifactManifest(raw, fallbackPaths, userText);
+  if (!draft.length) {
+    emitProcessEvent(options, processEvent("thinking", "設計データを再生成", "説明文を除き、ファイル計画だけを厳格なJSONで作り直しています。"));
+    raw = await llmChat(planningModel, [
+      {
+        role: "system",
+        content: "Return JSON only. Schema: {\"files\":[{\"path\":\"relative/path.ext\",\"purpose\":\"why needed\"}]}. Use only relative text-file paths. Include every file required to run and test the requested product."
+      },
+      {
+        role: "user",
+        content: `Primary request:\n${userText}\n\nScope: ${options.scope || "medium"}; quality: ${options.qualityBar || "standard"}.\n\nWorkspace:\n${clip(context, 5000)}`
+      }
+    ], {
+      numPredict: 1400,
+      temperature: 0,
+      format: "json",
+      timeout: options.timeout ?? 90000,
+      signal: options.signal,
+      fallbackModel: options.fallbackModel,
+      onFallback: options.onFallback
+    });
+    draft = parseCodeArtifactManifest(raw, fallbackPaths, userText);
+  }
+  if (!options.deepArchitecture || !draft.length) return draft;
+
+  emitProcessEvent(options, processEvent("thinking", "設計を別視点でレビュー", "規模、責務分離、実行方法、テストの抜けを確認しています。"));
+  const reviewedRaw = await llmChat(planningModel, [
+    {
+      role: "system",
+      content: [
+        "You are Nexa's architecture critic. Return JSON only using the same artifact-plan schema.",
+        "Review the draft against the actual request. Correct technology drift, toy implementations, missing runtime files, weak module boundaries, missing tests, and missing setup scripts.",
+        "Keep paths relative and include only files that the implementation agent can generate as text. Do not explain your review outside JSON."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: [
+        `Primary request:\n${userText}`,
+        `Delivery scope: ${options.scope || "large"}. Quality bar: ${options.qualityBar || "production"}.`,
+        `Draft plan:\n${clip(raw, 12000)}`,
+        `Workspace evidence:\n${clip(context, 7000)}`
+      ].join("\n\n")
+    }
+  ], {
+    numPredict: 1800,
+    temperature: 0.04,
+    format: "json",
+    timeout: options.timeout ?? 90000,
+    signal: options.signal,
+    fallbackModel: options.fallbackModel,
+    onFallback: options.onFallback
+  });
+  const reviewed = parseCodeArtifactManifest(reviewedRaw, [], userText);
+  let selected = reviewed.length >= Math.max(2, Math.ceil(draft.length * 0.75)) ? reviewed : draft;
+  const gaps = artifactManifestGaps(selected, options.qualityBar);
+  if (gaps.length) {
+    emitProcessEvent(options, processEvent("thinking", "実行可能性の不足を補う", `${gaps.join(", ")} を設計へ追加します。`, { gaps }));
+    const repairedPlanRaw = await llmChat(planningModel, [
+      {
+        role: "system",
+        content: "Return JSON only using {\"files\":[{\"path\":\"relative/path.ext\",\"purpose\":\"...\"}]}. Repair the plan so the product can be installed or opened, run, and tested. Preserve its architecture and add every missing runtime, configuration, test, and setup file."
+      },
+      {
+        role: "user",
+        content: `Request:\n${userText}\n\nMissing plan capabilities:\n${gaps.join("\n")}\n\nCurrent files:\n${JSON.stringify(selected, null, 2)}`
+      }
+    ], {
+      numPredict: 1800,
+      temperature: 0,
+      format: "json",
+      timeout: options.timeout ?? 90000,
+      signal: options.signal,
+      fallbackModel: options.fallbackModel,
+      onFallback: options.onFallback
+    });
+    const repairedPlan = parseCodeArtifactManifest(repairedPlanRaw, [], userText);
+    if (repairedPlan.length && artifactManifestGaps(repairedPlan, options.qualityBar).length < gaps.length) selected = repairedPlan;
+  }
+  return selected;
 }
 
 function extractSingleGeneratedFile(text = "", requestedPath = "") {
   const expectedPath = normalizeGeneratedFilePath(requestedPath);
   if (!expectedPath) return null;
+  const source = stripThinking(String(text || "")).trim();
+  if (source.startsWith("{") && source.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(source);
+      const jsonPath = normalizeGeneratedFilePath(parsed.path);
+      const jsonContent = cleanGeneratedFileContent(parsed.content);
+      if (jsonPath === expectedPath && generatedFileContentLooksWritable(expectedPath, jsonContent)) {
+        return { path: expectedPath, content: jsonContent, operation: "write" };
+      }
+    } catch {
+      // Continue with marker and fenced-block parsing.
+    }
+  }
+  const marker = String(text || "").match(/<<<NEXA_FILE(?::|\s+)([^>]+)>>>[\t ]*\r?\n([\s\S]*?)<<<NEXA_END_FILE>>>/i);
+  if (marker && normalizeGeneratedFilePath(marker[1]) === expectedPath) {
+    const markerContent = cleanGeneratedFileContent(marker[2]);
+    if (generatedFileContentLooksWritable(expectedPath, markerContent)) {
+      return { path: expectedPath, content: markerContent, operation: "write" };
+    }
+  }
   const blocks = extractGeneratedFileBlocks(text);
   const exact = blocks.find((block) => block.path === expectedPath && block.operation !== "delete");
   if (exact) return exact;
-  const source = stripThinking(String(text || "")).trim();
   const genericFence = source.match(/```(?:[A-Za-z0-9_+.-]+)?\s*\n([\s\S]*?)```/);
   const content = cleanGeneratedFileContent(genericFence?.[1] || source);
   if (!content || !generatedFileContentLooksWritable(expectedPath, content)) return null;
@@ -8468,13 +8643,14 @@ async function singleCodeArtifactCall(model, userText, context, manifest, file, 
   const related = completedBlocks
     .map((block) => `--- ${block.path} ---\n${clip(block.content, 5000)}`)
     .join("\n\n");
-  const raw = await llmChat(model, [
+  const messages = [
     {
       role: "system",
       content: [
         "You are Nexa's implementation agent.",
         `Generate exactly one complete file: ${file.path}.`,
-        "Return one fenced file block only, using the exact relative path. No prose or analysis.",
+        `Return exactly this transport format: <<<NEXA_FILE:${file.path}>>> on its own line, then the complete raw file content, then <<<NEXA_END_FILE>>> on its own line.`,
+        "Do not use an outer Markdown fence. The file content may contain its own Markdown fences when the target is documentation. No prose or analysis outside the markers.",
         "The file must contain production-quality, runnable implementation rather than placeholders or TODOs.",
         "Keep it consistent with the manifest and already generated files. Implement the user's actual genre and requirements; never substitute a canned template.",
         "Use accessible responsive UI for frontend files and robust error handling for executable code where relevant."
@@ -8491,7 +8667,8 @@ async function singleCodeArtifactCall(model, userText, context, manifest, file, 
         related ? `Already generated files for interface consistency:\n${clip(related, 14000)}` : ""
       ].filter(Boolean).join("\n\n")
     }
-  ], {
+  ];
+  const raw = await llmChat(model, messages, {
     numPredict: /(?:readme|\.md$|\.json$)/i.test(file.path) ? 2200 : 5200,
     temperature: 0.16,
     timeout: options.timeout ?? 120000,
@@ -8499,13 +8676,107 @@ async function singleCodeArtifactCall(model, userText, context, manifest, file, 
     fallbackModel: options.fallbackModel,
     onFallback: options.onFallback
   });
-  return extractSingleGeneratedFile(raw, file.path);
+  const direct = extractSingleGeneratedFile(raw, file.path);
+  if (direct) return direct;
+
+  const formatterModel = options.formatterModel || options.plannerModel || "";
+  if (!formatterModel || formatterModel === model) return null;
+  const repaired = await llmChat(formatterModel, [
+    {
+      role: "system",
+      content: [
+        "You are Nexa's structured file finisher.",
+        "Return one JSON object only: {\"path\":\"exact/relative/path.ext\",\"content\":\"complete raw file content\"}.",
+        "Remove analysis and prose outside the file. If the draft is incomplete, complete the requested file consistently with the manifest.",
+        "Never return placeholders, TODOs, absolute paths, or a different technology stack."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: [
+        `Primary request:\n${userText}`,
+        `Exact target path:\n${file.path}`,
+        `Purpose:\n${file.purpose}`,
+        `Manifest:\n${JSON.stringify({ files: manifest }, null, 2)}`,
+        `Implementation draft to recover:\n${clip(raw, 12000)}`,
+        related ? `Related completed files:\n${clip(related, 9000)}` : ""
+      ].filter(Boolean).join("\n\n")
+    }
+  ], {
+    numPredict: /(?:readme|\.md$|\.json$)/i.test(file.path) ? 2600 : 5600,
+    temperature: 0.08,
+    format: "json",
+    timeout: options.timeout ?? 120000,
+    signal: options.signal,
+    fallbackModel: "",
+    onFallback: options.onFallback
+  });
+  return extractSingleGeneratedFile(repaired, file.path);
+}
+
+async function repairFailedGeneratedFiles(model, project, userText, manifestFiles = [], checks = {}, options = {}) {
+  if (!model || !project?.workspaceReady) return null;
+  const failedResults = (checks.results || []).filter((result) => !result.ok);
+  if (!failedResults.length) return null;
+  const repairs = [];
+  for (const file of manifestFiles) {
+    const normalizedPath = String(file.path || "").replace(/\\/g, "/").toLowerCase();
+    const relatedFailures = failedResults.filter((result) => String(result.command || "").replace(/\\/g, "/").toLowerCase().includes(normalizedPath));
+    if (!relatedFailures.length) continue;
+    let currentContent = "";
+    try {
+      currentContent = await readFile(projectScopedWorkspacePath(project, file.path), "utf8");
+    } catch {
+      continue;
+    }
+    const raw = await llmChat(model, [
+      {
+        role: "system",
+        content: [
+          "You are Nexa's targeted code repair agent.",
+          "Return one JSON object only: {\"path\":\"exact/relative/path.ext\",\"content\":\"complete corrected file\"}.",
+          "Fix only the reported check failures while preserving intended behavior and public interfaces.",
+          "The returned content must pass the exact failing command. For parser errors, count and close every delimiter, brace, bracket, string, template literal, and comment before returning.",
+          "Never truncate the corrected file. Reproduce the complete source from beginning to end, including unchanged lines.",
+          "Return the complete non-empty file. No prose, placeholders, TODOs, or absolute paths."
+        ].join(" ")
+      },
+      {
+        role: "user",
+        content: [
+          `Primary request:\n${userText}`,
+          `Target file:\n${file.path}`,
+          `Check failure:\n${relatedFailures.map((result) => `${result.command}\n${result.stderr || result.stdout}`).join("\n\n")}`,
+          `Current file:\n${clip(currentContent, 18000)}`
+        ].join("\n\n")
+      }
+    ], {
+      numPredict: 6000,
+      temperature: 0.04,
+      format: "json",
+      timeout: options.timeout ?? 120000,
+      signal: options.signal,
+      fallbackModel: "",
+      onFallback: options.onFallback
+    });
+    const repaired = extractSingleGeneratedFile(raw, file.path);
+    if (repaired && repaired.content !== currentContent) repairs.push(repaired);
+  }
+  if (!repairs.length) return null;
+  return writeGeneratedFileBlocks(project, repairs);
 }
 
 async function generateSegmentedCodeArtifacts(model, project, userText, context, route, options = {}) {
   const likelyFiles = expectedFilesForLog(userText, route).filter((filePath) => filePath !== "必要なファイル");
   emitProcessEvent(options, processEvent("thinking", "必要なファイルを設計", "一括出力ではなく、ファイル単位で安全に生成できる構成へ分解します。"));
-  const manifest = await codeArtifactManifestCall(model, userText, context, likelyFiles, options);
+  const scope = route?.intent?.semanticScope || "medium";
+  const qualityBar = route?.intent?.qualityBar || "standard";
+  const manifest = await codeArtifactManifestCall(model, userText, context, likelyFiles, {
+    ...options,
+    scope,
+    qualityBar,
+    deepArchitecture: scope === "large" || qualityBar === "production"
+  });
   if (!manifest.length) throw new Error("code_artifact_manifest_empty");
   emitProcessEvent(options, processEvent("thinking", "実装構成を確定", `${manifest.length}件のファイルを順番に生成します。`, {
     files: manifest.map((file) => ({ path: file.path, purpose: file.purpose }))
@@ -8518,10 +8789,12 @@ async function generateSegmentedCodeArtifacts(model, project, userText, context,
       index: index + 1,
       total: manifest.length
     }));
-    let block = await singleCodeArtifactCall(model, userText, context, manifest, file, blocks, options);
-    if (!block) {
-      emitProcessEvent(options, processEvent("thinking", `${file.path} の出力を補修`, "説明文が混ざったため、ファイル本文だけを再生成します。", { file: file.path }));
+    let block = null;
+    for (let fileAttempt = 0; fileAttempt < 3 && !block; fileAttempt += 1) {
       block = await singleCodeArtifactCall(model, userText, context, manifest, file, blocks, options);
+      if (!block && fileAttempt < 2) {
+        emitProcessEvent(options, processEvent("thinking", `${file.path} の出力を補修`, `ファイル本文以外が混ざったため、専用形式で再生成します (${fileAttempt + 2}/3)。`, { file: file.path }));
+      }
     }
     if (!block) throw new Error(`code_artifact_generation_failed:${file.path}`);
     blocks.push(block);
@@ -8582,11 +8855,15 @@ function cleanGeneratedFileContent(content = "") {
 
 function generatedFileContentLooksWritable(filePath = "", content = "") {
   const ext = path.extname(String(filePath || "")).toLowerCase();
+  const normalizedPath = String(filePath || "").replace(/\\/g, "/").toLowerCase();
   const value = String(content || "").trim();
   if (!value) return false;
   if (/^(?:here(?:'s| is)\b|okay\b|sure\b|let me\b|the user\b|we need\b|i need\b|first,?\s+i\b)/i.test(value)) return false;
   if (/(?:the user (?:asked|wants)|previous conversation|let me (?:think|draft|check)|i (?:need|should) to|proposed changes:)/i.test(value.slice(0, 2400))) return false;
   if ([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"].includes(ext)) {
+    if (/(?:path\/to\/|relative\/path|your[-_ ](?:api|file|path)|\bTODO\b|placeholder)/i.test(value)) return false;
+    if (/(?:^|\/)(?:test|tests|__tests__)(?:\/|\.)|\.(?:test|spec)\./.test(normalizedPath) &&
+        !/\b(?:describe|it|test|assert|expect)\s*\(/.test(value)) return false;
     return /(?:[{};]|=>|\b(?:import|export|const|let|var|function|class|async|document|window)\b)/.test(value);
   }
   if ([".html", ".htm", ".xml", ".svg"].includes(ext)) return /<[^>]+>/.test(value);
@@ -10854,6 +11131,7 @@ async function materializeCoderOutput(project, route, model, userText, context, 
   let accumulatedWriteResult = { applied: false, files: [], project };
   let workspaceWasEmpty = true;
   let segmentedAttempted = false;
+  let segmentedGenerationFailed = false;
   let segmentedBlocks = [];
   if (project?.workspaceReady) {
     emitProcessEvent(options, processEvent("thinking", "作業フォルダーを確認", project.selectedFolderName || folderNameFromWorkspace(project.workspaceRoot || "") || project.name || "workspace", {
@@ -10888,11 +11166,14 @@ async function materializeCoderOutput(project, route, model, userText, context, 
       }
     } catch (error) {
       lastError = error.message;
+      segmentedGenerationFailed = true;
+      finalCoderOutput = "";
       emitProcessEvent(options, processEvent("thinking", "ファイル単位生成を再調整", userVisibleWriteIssue(lastError)));
     }
   }
 
   for (let attempt = 0; attempt < (AI_CODE_GENERATION_ONLY ? 4 : 2); attempt += 1) {
+    if (segmentedGenerationFailed) break;
     let fileBlocks = project.workspaceReady
       ? (attempt === 0 && segmentedBlocks.length ? segmentedBlocks : extractGeneratedFileBlocks(finalCoderOutput))
       : [];
@@ -10999,9 +11280,21 @@ async function materializeCoderOutput(project, route, model, userText, context, 
         for (const event of codeProcessFileEvents(writeResult, userText)) {
           emitProcessEvent(options, event);
         }
-        const verification = await verifyWrittenFilesSummary(project, writeResult.files);
-        const postWriteChecks = await runPostWriteChecksForFiles(project, writeResult.files, options);
-        const checkSummary = postWriteChecksSummary(postWriteChecks);
+        let verification = await verifyWrittenFilesSummary(project, writeResult.files);
+        let postWriteChecks = await runPostWriteChecksForFiles(project, writeResult.files, options);
+        let checkSummary = postWriteChecksSummary(postWriteChecks);
+        for (let repairPass = 0; !postWriteChecks.ok && options.formatterModel && repairPass < 2; repairPass += 1) {
+          emitProcessEvent(options, processEvent("thinking", "失敗したファイルだけを修正", `通過済みファイルは保持し、エラーが出たファイルへ検証結果を返します (${repairPass + 1}/2)。`));
+          const targetedRepair = await repairFailedGeneratedFiles(options.formatterModel, project, userText, fileBlocks, postWriteChecks, options);
+          if (!targetedRepair?.files?.length) break;
+          repaired = true;
+          accumulatedWriteResult = mergeWriteResults(accumulatedWriteResult, targetedRepair);
+          writeResult = accumulatedWriteResult;
+          for (const event of codeProcessFileEvents(targetedRepair, userText)) emitProcessEvent(options, event);
+          verification = await verifyWrittenFilesSummary(project, writeResult.files);
+          postWriteChecks = await runPostWriteChecksForFiles(project, writeResult.files, options);
+          checkSummary = postWriteChecksSummary(postWriteChecks);
+        }
         if (!postWriteChecks.ok) {
           lastError = `post_write_checks_failed:${postWriteChecks.results.filter((result) => !result.ok).map((result) => result.command).join(",") || postWriteChecks.error || "unknown"}`;
           if (model && attempt < 3) {
@@ -11040,7 +11333,7 @@ async function materializeCoderOutput(project, route, model, userText, context, 
     } else if (patch) {
       try {
         emitProcessEvent(options, processEvent("thinking", "差分を確認", "既存ファイルへ適用できる変更差分として検証しています。"));
-        let patchResult = await workspacePatch({ projectId: project.id, patch, dryRun: false });
+        let patchResult = await workspacePatch({ projectId: project.id, patch, dryRun: false, requireNonEmpty: true });
         const quality = AI_CODE_GENERATION_ONLY ? { result: patchResult, upgraded: false } : await maybeUpgradeLandingQuality(project, userText, patchResult, options);
         patchResult = quality.result;
         const completion = AI_CODE_GENERATION_ONLY ? { result: patchResult, completed: false, missing: [] } : await maybeCompleteReferencedWebAssets(project, userText, patchResult, options);
@@ -11611,8 +11904,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     emitStep("thinking", "保存するコードを生成", project.workspaceReady
       ? `選択フォルダーへ直接保存できる file ブロックまたは差分を作ります。想定ファイル: ${requestedFilesForLog}`
       : `フォルダー未選択のため、保存可能なコード案だけ準備します。想定ファイル: ${requestedFilesForLog}`);
-    const note = cleanCoderOutput(await coderAgentCall(codeModel, userText, context, llmOptions(localCodeModel || localSmartModel, { signal: options.signal })));
-    emit(agentItem("coder", note, codeModel, 6000));
+    if (project.workspaceReady && route.intent?.semanticAction === "create") {
+      emit(agentItem("coder", "The direct artifact pipeline will plan architecture and generate each file independently inside the selected workspace.", codeModel));
+    } else {
+      const note = cleanCoderOutput(await coderAgentCall(codeModel, userText, context, llmOptions(localCodeModel || localSmartModel, { signal: options.signal })));
+      emit(agentItem("coder", note, codeModel, 6000));
+    }
   } else {
     emit(agentItem("coder", "No code-specific deep pass required."));
   }
@@ -12179,13 +12476,26 @@ async function companyChatStream(req, res) {
     route.isComplex = route.isComplex || route.intent.isTerse || Boolean(route.intent.continuationHint);
     if (semanticIntentDecision?.confidence >= 0.62) {
       const semanticCodeActions = new Set(["create", "modify", "debug", "continue", "computer", "command"]);
+      const semanticTaskKinds = {
+        create: "code_create",
+        modify: "code_modify",
+        debug: "code_modify",
+        continue: "continue",
+        research: "research",
+        image: "image_generation",
+        explain: "explain",
+        chat: "chat"
+      };
       route.needsCode = route.needsCode || semanticIntentDecision.needsCode || semanticCodeActions.has(semanticIntentDecision.action);
       route.needsResearch = route.needsResearch || semanticIntentDecision.needsResearch;
       route.isComplex = route.isComplex || semanticIntentDecision.continuation || semanticIntentDecision.action !== "chat";
       route.intent = {
         ...route.intent,
+        taskKind: semanticTaskKinds[semanticIntentDecision.action] || route.intent.taskKind,
         semanticAction: semanticIntentDecision.action,
         semanticTarget: semanticIntentDecision.target,
+        semanticScope: semanticIntentDecision.scope,
+        qualityBar: semanticIntentDecision.qualityBar,
         continuation: semanticIntentDecision.continuation,
         continuationHint: semanticIntentDecision.continuation ? semanticIntentDecision.resolvedRequest : route.intent.continuationHint,
         inferredGoal: semanticIntentDecision.resolvedRequest || route.intent.inferredGoal,
@@ -12507,7 +12817,9 @@ async function companyChatStream(req, res) {
           : "";
         const forceFreshRebuild = choiceResolution?.optionId === "workspace-delete-confirm";
         const forceContextRepair = codeFollowUpDecision?.action === "debug" || semanticIntentDecision?.action === "debug";
-        if (forceFreshRebuild || forceContextRepair || (coderOutput && !coderOutput.startsWith("fallback:"))) {
+        const hasWritableCoderDraft = Boolean(coderOutput && !coderOutput.startsWith("fallback:"));
+        const canUseDirectWorkspacePipeline = Boolean(route.needsCode && project.workspaceReady && model);
+        if (forceFreshRebuild || forceContextRepair || hasWritableCoderDraft || canUseDirectWorkspacePipeline) {
           const finalCoderOutput = await materializeCoderOutput(
             project,
             route,
@@ -12521,6 +12833,8 @@ async function companyChatStream(req, res) {
               send,
               messageId: assistantMessage.id,
               fallbackModel: company.fallbackModel,
+              plannerModel: system.plan?.fast || company.fallbackModel || model,
+              formatterModel: system.plan?.fast || company.fallbackModel || model,
               forceFreshRebuild: forceFreshRebuild || forceContextRepair,
               workspaceRebuild: assistantMessage.workspaceRebuild || null,
               onFallback: onStreamFallback
