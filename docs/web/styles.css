@@ -1,0 +1,51 @@
+:root { color-scheme: dark; font-family: Inter, "SF Pro Display", "Segoe UI", sans-serif; background:#101114; color:#f5f5f7; }
+* { box-sizing:border-box; }
+html, body { width:100%; height:100%; margin:0; overflow:hidden; }
+button, input, textarea, select { font:inherit; }
+button { color:inherit; }
+.web-app { width:100vw; height:100dvh; display:grid; grid-template-columns:280px minmax(0,1fr) 300px; background:#101114; }
+.history, .info { min-width:0; padding:18px 14px; overflow:auto; background:#151619; border-color:rgba(255,255,255,.08); }
+.history { border-right:1px solid rgba(255,255,255,.08); display:flex; flex-direction:column; gap:12px; }
+.info { border-left:1px solid rgba(255,255,255,.08); }
+.brand { height:38px; display:flex; align-items:center; gap:9px; padding:0 5px; }
+.brand img { width:25px; height:25px; }
+.brand strong { font-size:15px; }.brand span { color:#85858d; font-size:11px; }
+.new-chat { height:42px; display:flex; align-items:center; gap:10px; padding:0 13px; border:1px solid rgba(255,255,255,.11); border-radius:8px; background:rgba(255,255,255,.06); cursor:pointer; }
+.new-chat:hover { background:rgba(255,255,255,.1); }
+.search { height:38px; display:flex; align-items:center; gap:8px; padding:0 11px; border:1px solid rgba(255,255,255,.08); border-radius:8px; background:#111215; color:#777982; }
+.search input { width:100%; border:0; outline:0; color:#eee; background:transparent; }
+.history-list { display:grid; gap:4px; overflow:auto; }
+.history-item { width:100%; min-width:0; padding:10px; display:grid; gap:5px; text-align:left; border:0; border-radius:7px; background:transparent; cursor:pointer; }
+.history-item:hover, .history-item.active { background:rgba(255,255,255,.07); }
+.history-item strong, .history-item small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.history-item strong { font-size:13px; }.history-item small { color:#85858d; font-size:11px; }
+.desktop-link { margin-top:auto; padding:10px; color:#a9bfff; font-size:12px; text-decoration:none; }
+.conversation { min-width:0; height:100dvh; display:grid; grid-template-rows:58px minmax(0,1fr) auto; }
+.conversation header { padding:0 18px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid rgba(255,255,255,.08); }
+.conversation header div { display:grid; gap:2px; }.conversation header strong { font-size:13px; }.conversation header small { color:#777982; font-size:10px; }
+.panel-toggle { width:34px; height:34px; display:none; place-items:center; border:0; border-radius:8px; background:rgba(255,255,255,.06); cursor:pointer; }
+.messages { min-height:0; padding:34px max(18px,calc((100% - 760px)/2)); overflow-y:auto; overscroll-behavior:contain; }
+.empty { height:100%; display:grid; place-content:center; text-align:center; gap:8px; }.empty img { width:46px; margin:auto; }.empty h1 { margin:8px 0 0; font-size:26px; }.empty p { margin:0; color:#8d8e96; font-size:13px; }
+.message { margin:0 0 28px; display:grid; gap:9px; }.message.user { justify-items:end; }.meta { color:#888a92; font-size:11px; }
+.bubble { max-width:min(680px,100%); line-height:1.75; white-space:pre-wrap; overflow-wrap:anywhere; }
+.user .bubble { padding:10px 14px; border:1px solid rgba(255,255,255,.1); border-radius:14px; background:#292b30; }
+.reasoning { max-width:620px; border:1px solid rgba(255,255,255,.09); border-radius:8px; background:rgba(255,255,255,.025); }
+.reasoning summary { padding:8px 10px; display:flex; align-items:center; gap:8px; color:#aaaab2; font-size:12px; cursor:pointer; list-style:none; }.reasoning summary::-webkit-details-marker { display:none; }.reasoning summary::after { content:"›"; margin-left:auto; font-size:18px; transition:transform .18s ease; }.reasoning[open] summary::after { transform:rotate(90deg); }
+.reasoning div { padding:2px 12px 12px 28px; color:#92939c; font-size:12px; line-height:1.65; white-space:pre-line; }
+.composer { width:min(760px,calc(100% - 28px)); margin:0 auto max(14px,env(safe-area-inset-bottom)); padding:12px; border:1px solid rgba(255,255,255,.12); border-radius:20px; background:rgba(45,46,52,.96); box-shadow:0 18px 56px rgba(0,0,0,.35); }
+.composer textarea { width:100%; min-height:44px; max-height:150px; resize:none; border:0; outline:0; color:#f5f5f7; background:transparent; line-height:1.5; }
+.composer-row { display:flex; align-items:center; gap:8px; }.composer select, .mode-chip { height:34px; padding:0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; color:#ddd; background:#292b30; font-size:11px; }.mode-chip { display:grid; place-items:center; }
+.send { width:38px; height:38px; margin-left:auto; display:grid; place-items:center; border:0; border-radius:50%; background:#4279ef; cursor:pointer; }.send:disabled { opacity:.5; }.send.stop span { width:12px; height:12px; border-radius:2px; background:white; font-size:0; }
+.info section { padding:14px 3px 18px; border-bottom:1px solid rgba(255,255,255,.08); }.info h2 { margin:0 0 8px; font-size:13px; }.info p { margin:0; color:#8d8e96; font-size:12px; line-height:1.65; }
+.scrim { display:none; }
+@media (max-width:1050px) { .web-app { grid-template-columns:250px minmax(0,1fr); }.info { display:none; } }
+@media (max-width:760px) {
+  .web-app { grid-template-columns:minmax(0,1fr); }
+  .panel-toggle { display:grid; }
+  .history, .info { position:fixed; inset-block:0; z-index:20; display:flex; width:min(86vw,330px); transition:transform .28s cubic-bezier(.22,1,.36,1); }
+  .history { left:0; transform:translateX(-105%); }.info { right:0; transform:translateX(105%); flex-direction:column; }
+  body.history-open .history { transform:none; } body.info-open .info { transform:none; }
+  body.history-open .scrim, body.info-open .scrim { position:fixed; inset:0; z-index:15; display:block; border:0; background:rgba(0,0,0,.55); }
+  .messages { padding:24px 14px; }.conversation { grid-template-rows:54px minmax(0,1fr) auto; }.composer { width:calc(100% - 16px); margin-bottom:max(8px,env(safe-area-inset-bottom)); border-radius:17px; }
+  .empty h1 { font-size:22px; }.reasoning { max-width:100%; }.reasoning div { padding-left:12px; }
+}

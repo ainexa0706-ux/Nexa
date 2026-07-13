@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#101114" />
+  <title>Nexa Web</title>
+  <link rel="icon" href="../favicon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://js.puter.com/v2/"></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="web-app">
+    <aside class="history" id="historyPanel" aria-label="会話履歴">
+      <div class="brand"><img src="../nexa-mark.svg" alt="" /><strong>Nexa</strong><span>Web</span></div>
+      <button class="new-chat" id="newChat" type="button"><span>＋</span>新しいチャット</button>
+      <label class="search"><span>⌕</span><input id="historySearch" type="search" placeholder="履歴を検索" /></label>
+      <div class="history-list" id="historyList"></div>
+      <a class="desktop-link" href="../">デスクトップ版を見る</a>
+    </aside>
+
+    <main class="conversation">
+      <header>
+        <button class="panel-toggle" id="historyToggle" type="button" aria-label="履歴を開く">☰</button>
+        <div><strong id="chatTitle">新しいチャット</strong><small>チャットモード</small></div>
+        <button class="panel-toggle" id="infoToggle" type="button" aria-label="情報を開く">ⓘ</button>
+      </header>
+      <section class="messages" id="messages" aria-live="polite"></section>
+      <form class="composer" id="composer">
+        <textarea id="prompt" rows="1" placeholder="Nexaにメッセージを送信" aria-label="メッセージ"></textarea>
+        <div class="composer-row">
+          <select id="model" aria-label="モデル">
+            <option value="gpt-5.4-nano">Nexa 3.0</option>
+            <option value="gemini-3.1-flash-lite">Nexa 2.5 高速</option>
+          </select>
+          <span class="mode-chip">チャット</span>
+          <button class="send" id="send" type="submit" aria-label="送信"><span>↑</span></button>
+        </div>
+      </form>
+    </main>
+
+    <aside class="info" id="infoPanel" aria-label="Web版情報">
+      <section><h2>Web版</h2><p>スマートフォンとブラウザですぐ会話できます。</p></section>
+      <section><h2>保存</h2><p>会話履歴はこの端末内に保存されます。</p></section>
+      <section><h2>AI</h2><p>初回利用時にAIサービスの認証画面が開く場合があります。</p></section>
+      <section class="desktop-only"><h2>コード作業</h2><p>PCのファイル編集とコマンド実行はWindows版Nexaを使用します。</p></section>
+    </aside>
+    <button class="scrim" id="scrim" type="button" aria-label="パネルを閉じる"></button>
+  </div>
+</body>
+</html>
