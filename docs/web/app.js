@@ -4,6 +4,29 @@ const $ = (selector) => document.querySelector(selector);
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 const escapeText = (value) => String(value || "");
 
+function puterReady() { return typeof window.puter?.ai?.chat === "function"; }
+function setAiStatus(status, label) {
+  document.documentElement.dataset.aiStatus = status;
+  const root = $("#aiStatus");
+  if (!root) return;
+  root.dataset.status = status;
+  root.querySelector("strong").textContent = label;
+}
+async function waitForPuter(timeoutMs = 12000) {
+  if (puterReady()) return window.puter;
+  setAiStatus("loading", "AIを準備中");
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    if (puterReady()) {
+      setAiStatus("ready", "AI接続済み");
+      return window.puter;
+    }
+  }
+  setAiStatus("error", "AIを読み込めませんでした");
+  throw new Error("AIサービスを読み込めませんでした。通信環境を確認して再読み込みしてください。");
+}
+
 function load() {
   try { state.chats = JSON.parse(localStorage.getItem(STORE) || "[]"); } catch { state.chats = []; }
   if (!state.chats.length) createChat(); else state.activeId = state.chats[0].id;
@@ -55,13 +78,14 @@ function autoSize(){ const input=$("#prompt"); input.style.height="auto"; input.
 
 async function sendMessage(event) {
   event.preventDefault(); if (state.running) { state.generation += 1; state.running=false; updateSend(); return; }
-  const input=$("#prompt"); const prompt=input.value.trim(); if(!prompt || !window.puter) return;
+  const input=$("#prompt"); const prompt=input.value.trim(); if(!prompt) return;
   const chat=active(); chat.messages.push({role:"user",content:prompt}); if(chat.messages.length===1) chat.title=prompt.slice(0,28); chat.updatedAt=Date.now();
   const reply={role:"assistant",content:"",reasoning:""}; chat.messages.push(reply); input.value=""; autoSize(); state.running=true; const run=++state.generation; save(); render(); updateSend();
   try {
+    const ai = await waitForPuter();
     const history=chat.messages.slice(0,-1).slice(-18).map((m)=>({role:m.role,content:m.content}));
     history.unshift({role:"system",content:"あなたはNexaです。ユーザーの言語で直接答えてください。内部推論や英語の分析は表示せず、完成した回答だけを返してください。"});
-    const stream=await puter.ai.chat(history,{model:$("#model").value,stream:true});
+    const stream=await ai.ai.chat(history,{model:$("#model").value,stream:true});
     for await (const part of stream) { if(run!==state.generation) break; if(part?.text){reply.content+=part.text; renderMessages();} }
     if(!reply.content) reply.content="回答を生成できませんでした。もう一度お試しください。";
     reply.reasoning=reasoningSummary(prompt,reply.content); save(); render();
@@ -76,3 +100,13 @@ $("#newChat").addEventListener("click",createChat); $("#historySearch").addEvent
 $("#historyToggle").addEventListener("click",()=>{document.body.classList.toggle("history-open");document.body.classList.remove("info-open");});
 $("#infoToggle").addEventListener("click",()=>{document.body.classList.toggle("info-open");document.body.classList.remove("history-open");}); $("#scrim").addEventListener("click",closePanels);
 load(); render(); autoSize();
+if (puterReady()) setAiStatus("ready", "AI接続済み");
+else {
+  setAiStatus("loading", "AIを準備中");
+  window.addEventListener("load", () => {
+    window.setTimeout(() => {
+      const ready = puterReady();
+      setAiStatus(ready ? "ready" : "error", ready ? "AI接続済み" : "AIを読み込めませんでした");
+    }, 500);
+  }, { once:true });
+}
