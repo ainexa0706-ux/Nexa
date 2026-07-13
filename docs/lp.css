@@ -349,6 +349,26 @@ h2 {
   gap: 14px;
 }
 
+.capability-grid article {
+  min-height: 242px;
+}
+
+.capability-grid article:nth-child(2),
+.capability-grid article:nth-child(5) {
+  background:
+    linear-gradient(145deg, rgba(112, 161, 255, 0.11), rgba(255, 255, 255, 0.035));
+}
+
+.pricing-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.pricing-grid article:nth-child(3) {
+  border-color: rgba(79, 208, 141, 0.42);
+  background:
+    linear-gradient(145deg, rgba(79, 208, 141, 0.13), rgba(255, 255, 255, 0.04));
+}
+
 article {
   min-height: 220px;
   padding: 22px;
@@ -384,6 +404,69 @@ article p,
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
   gap: 34px;
   align-items: center;
+}
+
+.support-list {
+  margin-top: 24px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.support-list span {
+  padding: 7px 10px;
+  color: #dbe4f2;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 12px;
+}
+
+.terminal-card {
+  overflow: hidden;
+  border: 1px solid rgba(112, 161, 255, 0.26);
+  border-radius: 18px;
+  background: #0a0d13;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.045);
+}
+
+.terminal-card::before {
+  content: "Nexa / 実行ログ";
+  min-height: 42px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  color: #858e9e;
+  border-bottom: 1px solid var(--line);
+  font: 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.terminal-card p {
+  margin: 0;
+  padding: 12px 16px;
+  display: flex;
+  gap: 12px;
+  color: #dce4f1;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  font: 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.terminal-card p:last-child {
+  border-bottom: 0;
+}
+
+.terminal-card i {
+  color: #67dda1;
+  font-style: normal;
+}
+
+.honesty-note {
+  margin: 20px 0 0;
+  padding: 14px 16px;
+  color: #aeb7c6;
+  border-left: 2px solid rgba(112, 161, 255, 0.7);
+  background: rgba(112, 161, 255, 0.055);
+  font-size: 13px;
 }
 
 .steps {
@@ -496,6 +579,7 @@ footer span {
   .workspace-visual,
   .split-band,
   .feature-grid,
+  .pricing-grid,
   .media-strip {
     grid-template-columns: 1fr;
   }

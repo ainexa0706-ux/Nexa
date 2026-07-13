@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, dialog, shell, ipcMain, safeStorage, session } = require("electron");
 const path = require("node:path");
 const net = require("node:net");
 const fs = require("node:fs");
@@ -7,9 +7,55 @@ const { spawn } = require("node:child_process");
 let mainWindow = null;
 let serverProcess = null;
 let serverPort = 0;
+const SESSION_COOKIE = "nexa_session";
 
 function appRoot() {
   return path.resolve(__dirname, "..");
+}
+
+function desktopSessionFile() {
+  return path.join(app.getPath("userData"), "nexa-session.bin");
+}
+
+function saveDesktopSession(token) {
+  if (!token || !safeStorage.isEncryptionAvailable()) return false;
+  fs.writeFileSync(desktopSessionFile(), safeStorage.encryptString(token), { mode: 0o600 });
+  return true;
+}
+
+function loadDesktopSession() {
+  const file = desktopSessionFile();
+  if (!fs.existsSync(file) || !safeStorage.isEncryptionAvailable()) return "";
+  try {
+    return safeStorage.decryptString(fs.readFileSync(file));
+  } catch {
+    fs.rmSync(file, { force: true });
+    return "";
+  }
+}
+
+function clearDesktopSession() {
+  fs.rmSync(desktopSessionFile(), { force: true });
+}
+
+async function restoreDesktopSessionCookie(port) {
+  const token = loadDesktopSession();
+  if (!token) return;
+  await session.defaultSession.cookies.set({
+    url: `http://localhost:${port}/`,
+    name: SESSION_COOKIE,
+    value: token,
+    path: "/",
+    httpOnly: true,
+    sameSite: "lax",
+    expirationDate: Math.floor(Date.now() / 1000) + 90 * 24 * 60 * 60
+  });
+}
+
+async function captureBrowserSessionCookie(port) {
+  const cookies = await session.defaultSession.cookies.get({ url: `http://localhost:${port}/`, name: SESSION_COOKIE });
+  const active = cookies.find((cookie) => cookie.name === SESSION_COOKIE && cookie.value);
+  if (active) saveDesktopSession(active.value);
 }
 
 function resolveFreePort() {
@@ -233,6 +279,7 @@ async function startLocalServer() {
 }
 
 async function createWindow() {
+  await restoreDesktopSessionCookie(serverPort);
   mainWindow = new BrowserWindow({
     width: 1500,
     height: 940,
@@ -244,6 +291,7 @@ async function createWindow() {
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -251,6 +299,9 @@ async function createWindow() {
   });
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.webContents.once("did-finish-load", () => {
+    captureBrowserSessionCookie(serverPort).catch(() => {});
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(`http://localhost:${serverPort}`) || url.startsWith(`http://127.0.0.1:${serverPort}`)) {
       return { action: "allow" };
@@ -266,6 +317,9 @@ async function createWindow() {
 
   await mainWindow.loadURL(`http://localhost:${serverPort}`);
 }
+
+ipcMain.handle("nexa-session:save", (_event, token) => saveDesktopSession(String(token || "").slice(0, 512)));
+ipcMain.handle("nexa-session:clear", () => clearDesktopSession());
 
 app.whenReady().then(async () => {
   try {

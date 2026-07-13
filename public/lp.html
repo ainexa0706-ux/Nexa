@@ -6,7 +6,7 @@
     <title>Nexa - AI開発ワークスペース</title>
     <meta
       name="description"
-      content="Nexaは、ChatGPTの会話UIとCodexの開発UIを切り替えられるローカルファーストAIワークスペースです。"
+      content="Nexaは、会話、プロジェクト記憶、コード生成、ファイル操作、検証をひとつに統合したローカルファーストAIワークスペースです。"
     />
     <link rel="icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/lp.css" />
@@ -20,6 +20,7 @@
       </a>
       <nav aria-label="ページ内ナビゲーション">
         <a href="#workspace">ワークスペース</a>
+        <a href="#capabilities">できること</a>
         <a href="#workflow">開発</a>
         <a href="#credits">クレジット</a>
         <a href="#pricing">料金</a>
@@ -31,11 +32,11 @@
     <main>
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">ローカルファーストのマルチエージェントAIワークスペース</p>
+          <p class="eyebrow">Nexa 3.0 / ローカルファーストAIワークスペース</p>
           <h1>Nexa</h1>
           <p class="lead">
-            会話、コード、ファイル、記憶をひとつの作業空間で扱うAIワークスペースです。
-            新規チャットはChatGPTのようにすぐ始められ、コード作業ではフォルダーを選んでCodexのように開発できます。
+            会話、コード、ファイル、記憶、検証をひとつの作業空間で扱えます。
+            普段の相談は軽快に、開発ではPCのフォルダーを選び、作成・編集・削除から動作確認まで同じチャットで進められます。
           </p>
           <div class="hero-actions">
             <a class="primary-action" href="/">今すぐ開く</a>
@@ -56,19 +57,19 @@
             <div class="message user">このフォルダーでログイン画面を直して</div>
             <div class="message ai">
               <b>Nexa</b>
-              <p>認証、課金、管理画面を分離します。Astraが方針を整理し、Forgeが実装、Proofが検証します。</p>
+              <p>既存ファイルを確認しました。認証、課金、管理画面の責務を分けて修正し、最後にテストします。</p>
             </div>
             <div class="composer-demo">
-              <span>Nexa2.5</span>
+              <span>Nexa3.0</span>
               <span>コードモード</span>
               <button>送信</button>
             </div>
           </div>
           <div class="visual-panel">
             <strong>AIチーム</strong>
-            <div><span>Astra</span><em>計画</em></div>
-            <div><span>Forge</span><em>実装</em></div>
-            <div><span>Proof</span><em>検証</em></div>
+            <div><span>計画</span><em>要件を整理</em></div>
+            <div><span>コード</span><em>実装中</em></div>
+            <div><span>検証</span><em>確認待ち</em></div>
           </div>
         </div>
       </section>
@@ -78,8 +79,8 @@
           <p class="eyebrow">ワークスペース</p>
           <h2>会話UIと開発UIを切り替えられる。</h2>
           <p>
-            チャットモードでは相談や文章作成を素早く行い、コードモードではPC上の作業フォルダーをプロジェクトとして扱います。
-            両方モードなら、会話しながらコード、資料、ファイル整理まで同じ流れで進められます。
+            チャットモードは会話と文章作成に集中し、コードモードはPC上の作業フォルダーをプロジェクトとして扱います。
+            両方モードなら、相談からファイル作成までをひとつの流れで進められます。モードはチャットごとに保持されます。
           </p>
         </div>
         <div class="feature-grid">
@@ -90,8 +91,8 @@
           </article>
           <article>
             <span>コードモード</span>
-            <h3>フォルダー単位で開発</h3>
-            <p>選んだフォルダーをプロジェクトとして扱い、変更ログ、レビュー、検証結果を会話内に残します。</p>
+            <h3>選択フォルダーへ直接保存</h3>
+            <p>必要な数のファイルを作成・編集・削除し、変更ログ、レビュー、検証結果を会話内に残します。</p>
           </article>
           <article>
             <span>記憶</span>
@@ -101,20 +102,85 @@
         </div>
       </section>
 
+      <section class="band" id="capabilities">
+        <div class="section-heading">
+          <p class="eyebrow">ジャンルを限定しない開発</p>
+          <h2>一つのテンプレートではなく、依頼から構成を決める。</h2>
+          <p>
+            Nexa 3.0は最新の依頼と現在のフォルダーを毎回読み直します。同じジャンルでも別の依頼なら前回の成果物を使い回さず、
+            プロジェクト名、機能、ファイル構成を組み直します。
+          </p>
+        </div>
+        <div class="feature-grid capability-grid">
+          <article>
+            <span>Web</span>
+            <h3>サイトとWebアプリ</h3>
+            <p>LP、管理画面、業務ツール、ダッシュボード、インタラクティブUIをレスポンシブ対応で構築します。</p>
+          </article>
+          <article>
+            <span>Game</span>
+            <h3>2D・3Dゲーム</h3>
+            <p>操作、ループ、敵、スコア、HUDを含むゲームを作成。3Dシューティングは専用の実行可能な復旧構成も備えます。</p>
+          </article>
+          <article>
+            <span>Backend</span>
+            <h3>APIとサーバー</h3>
+            <p>REST API、データ処理、Node.jsバックエンド、設定ファイル、テスト、READMEまで必要に応じて分割します。</p>
+          </article>
+          <article>
+            <span>Tools</span>
+            <h3>CLIと自動化</h3>
+            <p>Python、JavaScript、C#、Java、Go、Rustなど、依頼に合う言語と構成でツールを作成します。</p>
+          </article>
+          <article>
+            <span>Existing code</span>
+            <h3>既存プロジェクトを継続編集</h3>
+            <p>初回だけで終わりません。同じチャットの2回目以降も既存コードを再読込し、修正・追加・削除を続けます。</p>
+          </article>
+          <article>
+            <span>Recovery</span>
+            <h3>保存形式を自動補修</h3>
+            <p>モデル出力が壊れた場合は形式を再生成し、それでも失敗した時は依頼別の独立フォルダーへ安全に復旧します。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="split-band code-engine">
+        <div>
+          <p class="eyebrow">コードモード</p>
+          <h2>依頼を受けるたび、フォルダーの今を確認する。</h2>
+          <p>
+            最新のメッセージを新しい実装ターンとして扱い、古い出力より優先します。既存フォルダーに別プロジェクトを作る場合は、
+            固有名のサブフォルダーへ分離して元のファイルを保護します。
+          </p>
+          <div class="support-list" aria-label="対応ファイル">
+            <span>HTML / CSS / JS / TS</span><span>Python / C# / Java</span><span>Go / Rust / C / C++</span>
+            <span>Swift / Kotlin / Dart</span><span>Vue / Svelte / SQL</span><span>Docker / Shell / 設定ファイル</span>
+          </div>
+        </div>
+        <div class="terminal-card" aria-label="コードモードの処理例">
+          <p><i>01</i> 既存ファイルを確認</p>
+          <p><i>02</i> 最新依頼から構成を決定</p>
+          <p><i>03</i> 必要数のファイルを保存</p>
+          <p><i>04</i> 作成・編集・削除を記録</p>
+          <p><i>05</i> 構文・テスト・ビルドを確認</p>
+        </div>
+      </section>
+
       <section class="split-band" id="workflow">
         <div>
           <p class="eyebrow">開発フロー</p>
-          <h2>AI会社のように役割分担して進める。</h2>
+          <h2>Nexa 3.0が役割を分けて品質を確認する。</h2>
           <p>
-            Nexaは単体AIに丸投げするのではなく、計画、実装、検証、セキュリティ確認、最終回答を役割ごとに分けます。
-            短い指示でも意図を補い、必要な時だけ選択肢として質問を出します。
+            計画、記憶、ツール選択、実装、検証、安全確認、最終回答を分離します。短い指示は直近の会話へつなげ、
+            確認が必要な場合だけ選択式の質問を表示します。回答後の質問カードは残りません。
           </p>
         </div>
         <ol class="steps">
-          <li><b>1</b><span>Astraが目的と制約を整理</span></li>
-          <li><b>2</b><span>Forgeがコード変更案を作成</span></li>
-          <li><b>3</b><span>ProofとSentinelが検証</span></li>
-          <li><b>4</b><span>Auralisが自然な回答にまとめる</span></li>
+          <li><b>1</b><span>計画が最新依頼と制約を整理</span></li>
+          <li><b>2</b><span>記憶とツールが必要な情報を準備</span></li>
+          <li><b>3</b><span>コードが実ファイルへ変更を適用</span></li>
+          <li><b>4</b><span>検証と安全確認を通して結果を保存</span></li>
         </ol>
       </section>
 
@@ -154,7 +220,7 @@
             無料で始めて、開発作業が増えたらプロへ。高すぎず、でも本格的なAI開発アプリとして継続できる価格にしています。
           </p>
         </div>
-        <div class="feature-grid">
+        <div class="feature-grid pricing-grid">
           <article>
             <span>無料</span>
             <h3>¥0 / 月</h3>
@@ -170,7 +236,13 @@
             <h3>¥1,980 / 月</h3>
             <p>毎月5,000クレジット。おすすめ。コードモード強化、AIチームログ、高度なワークスペース操作。</p>
           </article>
+          <article>
+            <span>スタジオ</span>
+            <h3>¥4,980 / 月</h3>
+            <p>毎月12,000クレジット。大きなプロジェクト履歴、管理機能、将来のチーム機能を優先します。</p>
+          </article>
         </div>
+        <p class="honesty-note">Nexa 3.0は単一の新しい基盤モデル名ではありません。選択した実行モデルへ、会話履歴、プロジェクト記憶、ツール制御、ファイル操作、品質確認を組み合わせるNexaの実行方式です。</p>
       </section>
     </main>
 

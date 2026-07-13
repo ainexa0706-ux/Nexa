@@ -17,13 +17,15 @@ const MODE_DETAILS = {
   }
 };
 const ACCESS_DETAILS = {
-  full: { label: "フルアクセス権", description: "選択フォルダー内で編集・作成・コマンド実行まで許可します。" },
-  safety: { label: "セーフティー", description: "軽い作業は進め、危険な変更は確認します。" },
-  default: { label: "デフォルト", description: "重要な変更と実行前に確認する安全優先モードです。" }
+  full: { label: "フルアクセス", description: "インターネット、PC上の全ファイル、コマンド、Windows操作を確認なしで許可します。" },
+  safety: { label: "危険時に承認", description: "通常操作は進め、安全でない可能性がある操作だけ確認します。" },
+  default: { label: "承認を常に求める", description: "外部ファイルの変更、インターネット、コマンド、Windows操作を毎回確認します。" }
 };
-const MODEL_CHOICES = ["nexa-2.5", "nexa-2.0", "nexa-1.5", "nexa-1.0"];
-const MODEL_DEFAULT_CHOICE = "nexa-1.0";
+const MODEL_CHOICES = ["nexa-3.0", "nexa-2.5", "nexa-2.0", "nexa-1.5", "nexa-1.0"];
+const MODEL_DEFAULT_CHOICE = "nexa-3.0";
+const NEXA_RUNTIME_MIGRATION_KEY = "nexa-runtime-generation";
 const NEXA_MODEL_PROFILES = {
+  "nexa-3.0": { name: "Nexa3.0", score: 0, specialty: "自動最適化", meta: "計画・ツール・品質確認を統合" },
   auto: { name: "Nexa1.5", score: 0, specialty: "標準", meta: "自動選択" },
   conversation: { name: "Nexa2.0", score: 0, specialty: "高品質", meta: "会話・相談向け" },
   code: { name: "Nexa2.5", score: 0, specialty: "最上位", meta: "コード・推論向け" },
@@ -37,6 +39,7 @@ const NEXA_MODEL_PROFILES = {
   "codellama:7b": { name: "Nexa2.5", score: 0, specialty: "最上位", meta: "コード補助向け" }
 };
 const NEXA_MODEL_TIERS = [
+  { value: "nexa-3.0", label: "Nexa3.0", description: "自動最適化。依頼に合わせて計画・ツール・モデル・品質確認を統合", resolver: "orchestrated" },
   { value: "nexa-2.5", label: "Nexa2.5", description: "最も賢い。コード・推論・長い作業向け", resolver: "best" },
   { value: "nexa-2.0", label: "Nexa2.0", description: "高品質。相談・設計・実装のバランス", resolver: "smart" },
   { value: "nexa-1.5", label: "Nexa1.5", description: "標準。普段使いと軽い開発向け", resolver: "balanced" },
@@ -51,52 +54,65 @@ const REASONING_DETAILS = {
 const PERFORMANCE_CHOICES = ["標準", "高速"];
 const ASSISTANT_DISPLAY_NAME = "Nexa";
 const AGENT_DISPLAY_NAMES = {
-  chief: "Astra",
-  orchestrator: "Astra",
-  planner: "Lattice",
-  plan: "Lattice",
-  memory: "Mneme",
-  toolsmith: "Navi",
-  toolrouter: "Navi",
-  tool: "Navi",
-  research: "Quanta",
-  researcher: "Quanta",
-  strategist: "Sage",
-  sage: "Sage",
-  secondopinion: "Mira",
-  mira: "Mira",
-  architect: "Helix",
-  reasoner: "Helix",
-  coder: "Forge",
-  patch: "Forge",
-  critic: "Prism",
-  verifier: "Proof",
-  selfevaluator: "Vela",
-  vela: "Vela",
-  security: "Sentinel",
-  response: "Auralis",
-  responsegenerator: "Auralis",
-  generator: "Lumen",
-  imagegenerator: "Lumen",
-  videogenerator: "Kino"
+  chief: "司令塔",
+  orchestrator: "司令塔",
+  planner: "計画",
+  plan: "計画",
+  memory: "記憶",
+  toolsmith: "ツール",
+  toolrouter: "ツール",
+  tool: "ツール",
+  research: "調査",
+  researcher: "調査",
+  strategist: "設計",
+  sage: "設計",
+  secondopinion: "別視点",
+  mira: "別視点",
+  architect: "推論",
+  reasoner: "推論",
+  coder: "コード",
+  patch: "コード",
+  critic: "批評",
+  verifier: "検証",
+  selfevaluator: "品質",
+  vela: "品質",
+  security: "安全",
+  response: "応答",
+  responsegenerator: "応答",
+  generator: "生成",
+  imagegenerator: "画像生成",
+  videogenerator: "動画生成",
+  checks: "エラー確認",
+  directwrite: "直接保存"
 };
 const IMAGE_GENERATION_ONLY = true;
 const MODE_STORAGE_KEY = "agent-company-last-project-mode";
 const MODE_CHIP_META = {
-  code: { label: "Mode", value: "Code", title: "\u30b3\u30fc\u30c9\u30e2\u30fc\u30c9" },
-  chat: { label: "Mode", value: "Chat", title: "\u30c1\u30e3\u30c3\u30c8\u30e2\u30fc\u30c9" },
-  both: { label: "Mode", value: "Both", title: "\u4e21\u65b9\u30e2\u30fc\u30c9" },
-  unset: { label: "Mode", value: "Select", title: "\u30e2\u30fc\u30c9\u672a\u9078\u629e" }
+  code: { label: "モード", value: "コード", title: "コードモード" },
+  chat: { label: "モード", value: "チャット", title: "チャットモード" },
+  both: { label: "モード", value: "両方", title: "両方モード" },
+  unset: { label: "モード", value: "選択", title: "モード未選択" }
 };
 
 function normalizeStoredModelChoice(value) {
   const clean = String(value || "").trim().toLowerCase();
   if (MODEL_CHOICES.includes(clean)) return clean;
+  if (clean === "auto" || clean.includes("3.0")) return "nexa-3.0";
   if (clean === "code" || clean.includes("coder") || clean.includes("deepseek") || clean.includes("codellama")) return "nexa-2.5";
   if (clean === "conversation" || clean.includes("mistral") || clean.includes("qwen3")) return "nexa-2.0";
   if (clean === "auto" || clean.includes("gemma") || clean.includes("llama")) return "nexa-1.5";
   if (clean === "fast" || clean.includes("qwen2.5")) return "nexa-1.0";
   return MODEL_DEFAULT_CHOICE;
+}
+
+function initialModelChoice() {
+  const stored = localStorage.getItem("agent-company-model-choice");
+  if (localStorage.getItem(NEXA_RUNTIME_MIGRATION_KEY) !== "3.0") {
+    localStorage.setItem(NEXA_RUNTIME_MIGRATION_KEY, "3.0");
+    localStorage.setItem("agent-company-model-choice", "nexa-3.0");
+    return "nexa-3.0";
+  }
+  return normalizeStoredModelChoice(stored);
 }
 
 const state = {
@@ -107,8 +123,10 @@ const state = {
   mcp: null,
   codex: null,
   liveAgents: [],
+  socialOps: null,
   attachments: [],
   busy: false,
+  followLatestMessage: true,
   abortController: null,
   query: "",
   renamingProjectId: "",
@@ -117,7 +135,7 @@ const state = {
   featurePanelOpen: false,
   modelMenuOpen: false,
   generationMode: "",
-  modelChoice: normalizeStoredModelChoice(localStorage.getItem("agent-company-model-choice")),
+  modelChoice: initialModelChoice(),
   modelSubmenu: "",
   performanceChoice: PERFORMANCE_CHOICES.includes(localStorage.getItem("agent-company-performance"))
     ? localStorage.getItem("agent-company-performance")
@@ -166,6 +184,7 @@ const el = {
   sourceList: document.querySelector("#sourceList"),
   modelPerfList: document.querySelector("#modelPerfList"),
   intelligenceList: document.querySelector("#intelligenceList"),
+  socialOpsList: document.querySelector("#socialOpsList"),
   agentList: document.querySelector("#agentList"),
   memoryList: document.querySelector("#memoryList"),
   taskList: document.querySelector("#taskList"),
@@ -352,6 +371,11 @@ function modelTier(value = state.modelChoice) {
 function resolveNexaTierModel(value = state.modelChoice, mode = projectMode()) {
   const plan = state.system?.plan || {};
   const tier = modelTier(value);
+  if (tier.resolver === "orchestrated") {
+    return mode === "code"
+      ? (plan.code || plan.conversation || plan.fast || "Auto")
+      : (plan.conversation || plan.code || plan.fast || "Auto");
+  }
   if (tier.resolver === "best") {
     return plan.code || plan.conversation || plan.fast || "Auto";
   }
@@ -467,9 +491,20 @@ function modeClass(project = state.activeProject) {
 }
 
 function lineStats(file = {}) {
-  const additions = Math.max(0, Number(file.additions ?? file.changedLines ?? 0));
-  const deletions = Math.max(0, Number(file.deletions ?? file.deletedLines ?? file.removedLines ?? 0));
+  const diffLines = String(file.diff || "").split("\n");
+  const diffAdditions = diffLines.filter((line) => line.startsWith("+")).length;
+  const diffDeletions = diffLines.filter((line) => line.startsWith("-")).length;
+  const additions = Math.max(0, Number(file.additions ?? (file.diff ? diffAdditions : file.changedLines ?? 0)));
+  const deletions = Math.max(0, Number(file.deletions ?? file.deletedLines ?? file.removedLines ?? diffDeletions));
   return { additions, deletions };
+}
+
+function renderDiffPreview(diff = "") {
+  const lines = String(diff || "差分情報はありません").split("\n").slice(0, 120);
+  return lines.map((line) => {
+    const tone = line.startsWith("+") ? "is-add" : line.startsWith("-") ? "is-delete" : "is-context";
+    return `<span class="${tone}">${escapeHtml(line || " ")}</span>`;
+  }).join("");
 }
 
 function memoryItemCount(memory = {}) {
@@ -482,7 +517,7 @@ function memoryItemCount(memory = {}) {
 }
 
 function agentLabel(agent = {}) {
-  const raw = agent.name || agent.title || agent.id || "Agent";
+  const raw = agent.name || agent.title || agent.id || "AI";
   const key = String(agent.id || raw).replace(/[\s_-]+/g, "").toLowerCase();
   return AGENT_DISPLAY_NAMES[key] || raw;
 }
@@ -492,32 +527,30 @@ function agentStatusText(agent = {}, busy = state.busy) {
   if (agent.error) return "確認が必要";
   if (!busy && /complete|done|ready/i.test(agent.status || "")) return "完了";
   if (!busy) return "待機中";
-  if (key.includes("orchestrator") || key.includes("chief") || key.includes("astra")) return "計画を立案中";
-  if (key.includes("planner") || key.includes("lattice")) return "タスクを分解中";
-  if (key.includes("memory") || key.includes("mneme")) return "記憶を照合中";
-  if (key.includes("tool") || key.includes("navi")) return "ツールを選定中";
-  if (key.includes("research") || key.includes("quanta")) return "情報源を確認中";
-  if (key.includes("strategist") || key.includes("sage")) return "成功条件を設計中";
-  if (key.includes("secondopinion") || key.includes("mira")) return "別視点で検証中";
-  if (key.includes("reason") || key.includes("architect") || key.includes("helix")) return "方針を検討中";
-  if (key.includes("coder") || key.includes("patch") || key.includes("forge")) return "コードを生成中";
-  if (key.includes("critic") || key.includes("prism")) return "設計をレビュー中";
-  if (key.includes("verifier") || key.includes("proof")) return "テストを検証中";
-  if (key.includes("selfevaluator") || key.includes("vela")) return "回答を採点中";
-  if (key.includes("security") || key.includes("sentinel")) return "脆弱性をスキャン中";
-  if (key.includes("response") || key.includes("auralis")) return "応答を準備中";
+  if (key.includes("orchestrator") || key.includes("chief")) return "計画を立案中";
+  if (key.includes("planner")) return "タスクを分解中";
+  if (key.includes("memory")) return "記憶を照合中";
+  if (key.includes("tool")) return "ツールを選定中";
+  if (key.includes("research")) return "情報源を確認中";
+  if (key.includes("strategist")) return "成功条件を設計中";
+  if (key.includes("secondopinion")) return "別視点で検証中";
+  if (key.includes("reason") || key.includes("architect")) return "方針を検討中";
+  if (key.includes("coder") || key.includes("patch")) return "コードを生成中";
+  if (key.includes("critic")) return "設計をレビュー中";
+  if (key.includes("verifier")) return "テストを検証中";
+  if (key.includes("selfevaluator")) return "回答を採点中";
+  if (key.includes("security")) return "脆弱性をスキャン中";
+  if (key.includes("response")) return "応答を準備中";
   return "実行中";
 }
 
 function agentTone(label = "") {
-  const key = String(label).toLowerCase();
-  if (key.includes("lattice")) return "planner";
-  if (key.includes("sage") || key.includes("mira")) return "planner";
-  if (key.includes("forge") || key.includes("helix")) return "coder";
-  if (key.includes("proof")) return "verifier";
-  if (key.includes("vela")) return "verifier";
-  if (key.includes("sentinel")) return "security";
-  if (key.includes("auralis")) return "response";
+  const key = String(label || "").toLowerCase();
+  if (/計画|設計|別視点|planner|strategist|second/.test(key)) return "planner";
+  if (/コード|推論|coder|patch|reason|architect/.test(key)) return "coder";
+  if (/検証|品質|verifier|self|vela/.test(key)) return "verifier";
+  if (/安全|security/.test(key)) return "security";
+  if (/応答|response/.test(key)) return "response";
   return "orchestrator";
 }
 
@@ -642,7 +675,16 @@ function renderWorkspaceFolder() {
 }
 
 function latestChangeRun(project = state.activeProject) {
-  return [...(project?.runs || [])].reverse().find((run) => Array.isArray(run.changes) && run.changes.length);
+  const runs = project?.runs || [];
+  const changeIndex = [...runs].map((run, index) => ({ run, index })).reverse()
+    .find(({ run }) => Array.isArray(run.changes) && run.changes.length)?.index ?? -1;
+  if (changeIndex < 0) return null;
+
+  // A later conversational/choice turn must not resurrect an old change card.
+  const superseded = runs.slice(changeIndex + 1).some((run) =>
+    ["choice-gate", "multi-agent-chat"].includes(run.type)
+  );
+  return superseded ? null : runs[changeIndex];
 }
 
 function latestRun(project = state.activeProject) {
@@ -759,6 +801,50 @@ function showArtifactPreview(artifact) {
 
 function closeArtifactPreview() {
   const modal = document.querySelector("#artifactPreviewModal");
+  if (modal) modal.hidden = true;
+}
+
+async function openWorkspaceFilePreview(filePath = "") {
+  const projectId = state.activeProject?.id;
+  if (!projectId || !filePath) return;
+  try {
+    const file = await api(`/api/workspace/file?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(filePath)}`);
+    showWorkspaceFilePreview(file);
+  } catch (error) {
+    setStatus(`ファイルを開けませんでした: ${error.message}`);
+  }
+}
+
+function showWorkspaceFilePreview(file = {}) {
+  let modal = document.querySelector("#workspaceFilePreviewModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "workspaceFilePreviewModal";
+    modal.className = "artifact-modal file-preview-modal";
+    document.body.appendChild(modal);
+  }
+  const content = file.text
+    ? `<pre><code>${escapeHtml(file.content || "")}</code></pre>`
+    : `<div class="file-preview-empty">このファイルはテキストプレビューできません。</div>`;
+  modal.innerHTML = `
+    <div class="artifact-modal-backdrop" data-close-file-preview></div>
+    <section class="artifact-modal-card file-preview-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(file.path || "file")}">
+      <header>
+        <strong>${escapeHtml(file.path || "file")}</strong>
+        <button type="button" data-close-file-preview aria-label="閉じる">×</button>
+      </header>
+      <div class="file-preview-body">${content}</div>
+      <footer>
+        <span>${escapeHtml(String(file.size || 0))} bytes</span>
+        ${file.hash ? `<span>${escapeHtml(file.hash.slice(0, 12))}</span>` : ""}
+      </footer>
+    </section>
+  `;
+  modal.hidden = false;
+}
+
+function closeWorkspaceFilePreview() {
+  const modal = document.querySelector("#workspaceFilePreviewModal");
   if (modal) modal.hidden = true;
 }
 
@@ -926,6 +1012,7 @@ async function loadAccountDetails() {
 async function loadAccount() {
   const me = await api("/api/auth/me");
   state.account = me.user || null;
+  if (!state.account && runningInElectron()) window.nexaDesktop?.clearSession?.();
   state.authProviders = me.providers || [];
   state.accountSetupRequired = Boolean(me.setupRequired);
   state.accountBilling = null;
@@ -950,6 +1037,7 @@ async function handleAccountSubmit(event) {
       }
     });
     state.account = result.user;
+    if (result.desktopSessionToken) await window.nexaDesktop?.saveSession?.(result.desktopSessionToken);
     state.accountNewSecret = "";
     el.accountPasswordInput.value = "";
     setAccountStatus(result.firstUser ? "管理者アカウントを作成しました。" : "ログインしました。");
@@ -985,6 +1073,7 @@ async function logoutAccount() {
     // Local session may already be gone; clear the UI either way.
   }
   state.account = null;
+  await window.nexaDesktop?.clearSession?.();
   state.accountBilling = null;
   state.accountKeys = [];
   state.accountNewSecret = "";
@@ -1013,6 +1102,7 @@ async function startDesktopGoogleLogin(google) {
       const result = await api(`/api/auth/google/desktop/poll?state=${encodeURIComponent(started.state)}`);
       if (result.status === "pending") continue;
       if (result.status === "complete") {
+        if (result.desktopSessionToken) await window.nexaDesktop?.saveSession?.(result.desktopSessionToken);
         state.account = result.user || null;
         state.accountNewSecret = "";
         setAccountStatus("Googleでログインしました。");
@@ -1059,26 +1149,52 @@ function processEventCount(event = {}) {
 
 function processEventLabel(event = {}) {
   const type = String(event.type || "thinking");
-  if (type === "command") return `${processEventCount(event)} 件のコマンドを実行`;
-  if (type === "edit") return `${processEventCount(event)} 件のファイルを編集`;
+  if (event.title) return event.title;
+  if (type === "command") return `${processEventCount(event)} 件の確認を実行`;
+  if (type === "edit") return `${processEventCount(event)} 件のファイルを反映`;
   if (type === "done") return event.title || "完了しました";
   if (type === "error") return event.title || "確認が必要です";
   return event.title || "処理中";
 }
 
+function renderProcessFileChips(event = {}) {
+  const files = Array.isArray(event.data?.files)
+    ? event.data.files
+    : event.data?.file
+    ? [event.data.file]
+    : [];
+  if (!files.length) return "";
+  return `
+    <div class="process-files">
+      ${files.slice(0, 8).map((file) => `
+        <button class="process-file-chip" type="button" data-open-workspace-file="${escapeHtml(file.path || "")}">
+          <span>${escapeHtml(file.path || "file")}</span>
+          ${file.status ? `<small>${escapeHtml(file.status)}</small>` : ""}
+        </button>
+      `).join("")}
+      ${files.length > 8 ? `<span class="process-file-more">+${escapeHtml(String(files.length - 8))}</span>` : ""}
+    </div>
+  `;
+}
+
 function renderProcessLogRow(event = {}) {
+  const detail = String(event.detail || "").trim();
   return `
     <div class="process-row is-${escapeHtml(event.type || "thinking")}">
       <span class="process-icon" aria-hidden="true">${escapeHtml(stableProcessEventIcon(event.type))}</span>
       <div class="process-copy">
         <strong>${escapeHtml(processEventLabel(event))}</strong>
-        ${event.detail && event.type !== "command" && event.type !== "edit" ? `<small>${escapeHtml(clipPlain(event.detail, 120))}</small>` : ""}
+        ${detail ? `<small>${escapeHtml(clipPlain(detail, event.type === "command" ? 220 : 180))}</small>` : ""}
+        ${renderProcessFileChips(event)}
       </div>
     </div>
   `;
 }
 
 function renderProcessEvents(events = []) {
+  // Chat mode is a clean conversation surface. Development telemetry remains
+  // available in code/both mode, but never competes with a normal reply.
+  if (projectMode() === "chat") return "";
   if (!events.length) return "";
   const latestEdit = [...events].reverse().find((event) => event.type === "edit" && event.data?.stats);
   const stats = latestEdit?.data?.stats;
@@ -1107,6 +1223,7 @@ function renderChoiceRequest(choiceRequest) {
         ${choiceRequest.options.map((option) => `
           <button class="choice-option" type="button"
             data-choice-action="${escapeHtml(option.action || "send-prompt")}"
+            data-choice-option="${escapeHtml(option.id || "")}"
             data-choice-prompt="${escapeHtml(option.prompt || "")}"
             data-choice-mode="${escapeHtml(option.mode || "")}">
             <strong>${escapeHtml(option.label || "選択")}</strong>
@@ -1118,6 +1235,15 @@ function renderChoiceRequest(choiceRequest) {
   `;
 }
 
+function resolvePendingChoiceRequest() {
+  const messages = state.activeProject?.messages || [];
+  const pending = [...messages].reverse().find((message) => message.role === "assistant" && message.choiceRequest);
+  if (!pending) return;
+  delete pending.choiceRequest;
+  pending.choiceResolvedAt = new Date().toISOString();
+  updateMessage(pending.id, pending.content, pending);
+}
+
 function renderMessageExtras(message = {}) {
   return [
     message.artifacts?.length ? `<div class="message-artifacts">${renderArtifactCards(message.artifacts)}</div>` : "",
@@ -1126,13 +1252,40 @@ function renderMessageExtras(message = {}) {
   ].filter(Boolean).join("");
 }
 
+function renderReasoningSummary(message = {}) {
+  if (message.role !== "assistant" || !message.reasoningSummary) return "";
+  return `
+    <details class="reasoning-summary">
+      <summary>
+        <span class="reasoning-summary-icon" aria-hidden="true">◇</span>
+        <span>推論の要約</span>
+        <small>クリックして展開</small>
+        <span class="reasoning-summary-chevron" aria-hidden="true">›</span>
+      </summary>
+      <div class="reasoning-summary-body">${escapeHtml(message.reasoningSummary)}</div>
+    </details>
+  `;
+}
+
 function renderLiveIntro(message = {}) {
   if (message.role !== "assistant" || !message.streaming) return "";
+  if (projectMode() === "chat") return "";
   return `
     <div class="message-live-intro">
       了解、依頼を受け取りました。必要な修正点を確認して、開発ログに進行を出します。
     </div>
   `;
+}
+
+function shouldHideStreamingBodyForProcessLog(message = {}) {
+  if (message.role !== "assistant" || !message.streaming) return false;
+  const mode = projectMode();
+  if (mode === "chat") return false;
+  const events = message.processEvents || [];
+  return events.some((event) => {
+    const text = `${event.type || ""} ${event.title || ""} ${event.detail || ""}`;
+    return /edit|command|error|working|progress|ファイル|コード|フォルダー|保存|変更|実装|検証|コマンド|直接/.test(text);
+  });
 }
 
 function processFinalSummary(message = {}, content = "") {
@@ -1158,7 +1311,7 @@ function processFinalSummary(message = {}, content = "") {
 }
 
 function renderMessageBodyContent(message = {}, content = message.content || "") {
-  if (message.role === "assistant" && message.streaming) return "";
+  if (shouldHideStreamingBodyForProcessLog(message)) return "";
   return processFinalSummary(message, content);
 }
 
@@ -1192,10 +1345,71 @@ function renderIntelligenceItems(project, run) {
   const readyCount = caps.filter((cap) => cap.ready).length;
   return [
     renderMiniItem("workspace-model-icon", `Lv${before.toFixed(1)} -> Lv${after.toFixed(1)}`, `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}`, "ready"),
-    renderMiniItem("workspace-shield-icon", "Quality gate", qualityMeta, qualityScore >= 82 || !qualityScore ? "ready" : "running"),
-    renderMiniItem("workspace-agent-icon", "Opus-style pass", intelligence.deepReasoning || intelligence.opusStyleWorkflow ? "active" : "standard", "ready"),
-    renderMiniItem("workspace-agent-icon", "Vela self-check", quality.revised ? "rewrote answer" : "score + revise", "ready"),
-    renderMiniItem("workspace-task-icon", "Capabilities", caps.length ? `${readyCount}/${caps.length}` : "multi-agent", "ready")
+    renderMiniItem("workspace-shield-icon", "Nexa品質", qualityMeta, qualityScore >= 82 || !qualityScore ? "ready" : "running"),
+    renderMiniItem("workspace-agent-icon", "Nexa深度", intelligence.deepReasoning || intelligence.opusStyleWorkflow ? "active" : "standard", "ready"),
+    renderMiniItem("workspace-agent-icon", "Nexa自己評価", quality.revised ? "rewrote answer" : "score + revise", "ready"),
+    renderMiniItem("workspace-task-icon", "Nexa機能", caps.length ? `${readyCount}/${caps.length}` : "team", "ready")
+  ].join("");
+}
+
+function socialPlatformLabel(platform = "") {
+  const labels = {
+    x: "X",
+    instagram: "Instagram",
+    tiktok: "TikTok",
+    youtube: "YouTube",
+    threads: "Threads",
+    facebook: "Facebook",
+    linkedin: "LinkedIn"
+  };
+  return labels[String(platform || "").toLowerCase()] || platform || "SNS";
+}
+
+function socialStatusLabel(status = "") {
+  return {
+    queued: "承認待ち",
+    approved: "承認済み",
+    published: "公開済み",
+    canceled: "停止"
+  }[String(status || "").toLowerCase()] || "待機中";
+}
+
+function socialStatusTone(status = "") {
+  return {
+    queued: "running",
+    approved: "ready",
+    published: "ready",
+    canceled: "danger"
+  }[String(status || "").toLowerCase()] || "idle";
+}
+
+function renderSocialOpsItems() {
+  if (!el.socialOpsList) return;
+  const social = state.socialOps || {};
+  const stats = social.stats || {};
+  const posts = Array.isArray(social.posts) ? social.posts : [];
+  const activePosts = posts.filter((post) => post.status !== "published" && post.status !== "canceled");
+  const latest = (activePosts.length ? activePosts : posts).slice(0, 3);
+  const summary = [
+    renderMiniItem("workspace-social-icon", "キャンペーン", `${stats.campaigns || 0}件`, stats.campaigns ? "ready" : "idle"),
+    renderMiniItem("workspace-social-icon", "承認待ち", `${stats.queued || 0}件`, stats.queued ? "running" : "ready"),
+    renderMiniItem("workspace-social-icon", "公開済み", `${stats.published || 0}件`, stats.published ? "ready" : "idle")
+  ];
+  const latestRows = latest.map((post) => `
+    <div class="workspace-item social-post-item is-${escapeHtml(statusDot(socialStatusTone(post.status)))}">
+      <span class="workspace-social-icon" aria-hidden="true"></span>
+      <span title="${escapeHtml(post.content || "")}">${escapeHtml(socialPlatformLabel(post.platform))}: ${escapeHtml(clipPlain(post.content || "", 28))}</span>
+      <small>${escapeHtml(socialStatusLabel(post.status))} / ${escapeHtml(relativeLabel(post.scheduledAt || post.updatedAt || post.createdAt))}</small>
+      <div class="social-post-actions">
+        ${post.status === "queued" ? `<button type="button" data-social-approve="${escapeHtml(post.id)}">承認</button>` : ""}
+        ${post.status === "approved" ? `<button type="button" data-social-publish="${escapeHtml(post.id)}">手動公開済み</button>` : ""}
+      </div>
+    </div>
+  `);
+  el.socialOpsList.innerHTML = [
+    ...summary,
+    ...latestRows,
+    `<button class="panel-action social-action" type="button" data-social-create>今の入力から運用案を作成</button>`
   ].join("");
 }
 
@@ -1236,15 +1450,17 @@ function renderWorkspacePanel() {
     el.intelligenceList.innerHTML = renderIntelligenceItems(project, run);
   }
 
+  renderSocialOpsItems();
+
   el.outputList.innerHTML = changes.length
     ? changes.slice(0, 8).map((file) => {
         const { additions, deletions } = lineStats(file);
         return `
-        <div class="workspace-item output-item">
+        <button class="workspace-item output-item" type="button" data-open-workspace-file="${escapeHtml(file.path)}" ${file.status === "deleted" ? "disabled" : ""}>
           <span class="workspace-file-icon" aria-hidden="true"></span>
           <span title="${escapeHtml(file.path)}">${escapeHtml(clipPlain(file.path, 34))}</span>
-          <small><b>+${escapeHtml(String(additions))}</b>${deletions ? ` <em>-${escapeHtml(String(deletions))}</em>` : ""}</small>
-        </div>
+          <small>${file.status === "deleted" ? "削除" : `<b>+${escapeHtml(String(additions))}</b>${deletions ? ` <em>-${escapeHtml(String(deletions))}</em>` : ""}`}</small>
+        </button>
       `;
       }).join("")
     : artifacts.length
@@ -1276,10 +1492,24 @@ function renderWorkspacePanel() {
   `;
 
   if (el.agentList) {
-    const fallbackAgents = ["Astra", "Lattice", "Sage", "Mira", "Forge", "Proof", "Vela", "Sentinel", "Auralis"].map((name) => ({
-      name,
+    const fallbackAgentIds = [
+      "orchestrator",
+      "planner",
+      "memory",
+      "toolrouter",
+      "reasoner",
+      "coder",
+      "verifier",
+      "security",
+      "responsegenerator"
+    ];
+    const fallbackAgents = fallbackAgentIds.map((id) => ({
+      id,
+      name: AGENT_DISPLAY_NAMES[id] || "AI",
       status: state.busy ? "running" : "ready",
-      model: name === "Forge" ? shortModel(plan.code || plan.conversation || "") : shortModel(plan.fast || plan.conversation || "")
+      model: id === "coder"
+        ? shortModel(plan.code || plan.conversation || "")
+        : shortModel(plan.fast || plan.conversation || plan.code || "")
     }));
     const agents = runAgents.length ? runAgents : fallbackAgents;
     el.agentList.innerHTML = agents.slice(0, 10).map((agent, index) => {
@@ -1545,14 +1775,14 @@ async function runDirectGeneration(kind, prompt, attachments) {
   const generationStatusLabel = cleanKind === "video" ? "\u52d5\u753b" : "\u753b\u50cf";
   setStatus(`${generationStatusLabel}\u751f\u6210\u4e2d`);
   state.liveAgents = [
-    { id: "orchestrator", name: "Astra", status: "running", model: "local" },
+    { id: "orchestrator", name: "Nexa", status: "running", model: "local" },
     {
       id: "generator",
-      name: "Lumen",
+      name: "Nexa",
       status: "running",
       model: "local-cinematic-image"
     },
-    { id: "verifier", name: "Proof", status: "running", model: "local" }
+    { id: "verifier", name: "Nexa", status: "running", model: "local" }
   ];
   renderWorkspacePanel();
 
@@ -1610,7 +1840,7 @@ function renderFeaturePanel() {
   const accessButtons = Object.entries(ACCESS_DETAILS).map(([key, detail]) => `
     <button class="feature-pill ${access === key ? "is-selected" : ""}" type="button" data-access-choice="${escapeHtml(key)}">
       <strong>${escapeHtml(detail.label)}</strong>
-      <span>${key === "full" ? "PC操作まで許可" : key === "safety" ? "危険操作だけ確認" : "毎回確認"}</span>
+      <span>${key === "full" ? "全ファイル・ネット・Windows" : key === "safety" ? "危険操作だけ確認" : "外部操作は毎回確認"}</span>
     </button>
   `).join("");
   el.featurePanel.innerHTML = `
@@ -1643,6 +1873,14 @@ function renderFeaturePanel() {
         <strong>画像生成</strong>
         <small>Web内でプレビュー</small>
       </button>
+    </section>
+    <section class="feature-section">
+        <span class="feature-section-title">SNS</span>
+        <button class="feature-option" type="button" data-feature="social">
+          <span>#</span>
+          <strong>SNS自動運用</strong>
+          <small>X / Instagram / TikTok / YouTube向けに投稿案を作成</small>
+        </button>
     </section>
     <section class="feature-section">
       <span class="feature-section-title">アクセス権限</span>
@@ -1928,7 +2166,7 @@ function renderMessages() {
   }
   for (const message of messages) appendMessage(message, false);
   appendChangeCard();
-  scrollMessages();
+  scrollMessages(true);
 }
 
 function appendChangeCard() {
@@ -1943,23 +2181,14 @@ function appendChangeCard() {
   }, { additions: 0, deletions: 0 });
   const previewFile = changes[0];
   const previewStats = lineStats(previewFile);
-  const previewLines = [
-    "@@ -1,7 +1,17 @@",
-    `+ // ${previewFile.path}`,
-    "+ import { workspace } from \"@/agent-company\";",
-    "+ const result = await orchestrator.run(task);",
-    "+ await verifier.check(result);",
-    "  // ... existing code ...",
-    "+ export const status = \"ready\";"
-  ];
   const card = document.createElement("section");
   card.className = "changes-card";
   card.innerHTML = `
     <div class="changes-card-head">
       <span class="changes-icon" aria-hidden="true"></span>
       <div>
-        <strong>変更を提案しました</strong>
-        <small>${changes.length} 個のファイルを変更 · +${totals.additions}${totals.deletions ? ` -${totals.deletions}` : ""}</small>
+        <strong>作業フォルダーを更新しました</strong>
+        <small>${changes.length} 個のファイルを直接変更 · +${totals.additions}${totals.deletions ? ` -${totals.deletions}` : ""}</small>
       </div>
       <button type="button" data-review-changes>レビューする</button>
     </div>
@@ -1968,22 +2197,21 @@ function appendChangeCard() {
         ${changes.slice(0, 8).map((file, index) => {
           const stats = lineStats(file);
           return `
-            <div class="changes-row ${index === 0 ? "is-selected" : ""}">
+            <button class="changes-row ${index === 0 ? "is-selected" : ""}" type="button" data-open-workspace-file="${escapeHtml(file.path)}" ${file.status === "deleted" ? "disabled" : ""}>
               <span>${escapeHtml(file.path)}</span>
-              <small><b>+${escapeHtml(String(stats.additions))}</b>${stats.deletions ? ` <em>-${escapeHtml(String(stats.deletions))}</em>` : ""}</small>
-            </div>
+              <small>${file.status === "deleted" ? "削除" : `<b>+${escapeHtml(String(stats.additions))}</b>${stats.deletions ? ` <em>-${escapeHtml(String(stats.deletions))}</em>` : ""}`}</small>
+            </button>
           `;
         }).join("")}
       </div>
       <div class="changes-preview">
         <div class="preview-title">${escapeHtml(previewFile.path)} <span>+${escapeHtml(String(previewStats.additions))}</span></div>
-        <pre class="diff-preview"><code>${escapeHtml(previewLines.join("\n"))}</code></pre>
+        <pre class="diff-preview"><code>${renderDiffPreview(previewFile.diff)}</code></pre>
       </div>
     </div>
     <div class="changes-actions">
-      <button type="button" data-review-changes>すべてを適用</button>
-      <button type="button" data-review-changes>選択して適用</button>
-      <span>安全性ゲート: 承認が必要です</span>
+      <button type="button" data-open-workspace-file="${escapeHtml(previewFile.path)}" ${previewFile.status === "deleted" ? "disabled" : ""}>ファイルを開く</button>
+      <span>選択フォルダーに適用済み</span>
     </div>
   `;
   el.messageStream.append(card);
@@ -2001,6 +2229,7 @@ function appendMessage(message, scroll = true) {
     </div>
     <div class="message-live-slot">${renderLiveIntro(message)}</div>
     <div class="message-process">${message.role === "assistant" ? renderProcessEvents(message.processEvents || []) : ""}</div>
+    <div class="message-reasoning">${renderReasoningSummary(message)}</div>
     <div class="message-body ${visibleContent ? "" : "is-empty"}">${renderMarkdown(visibleContent)}</div>
     <div class="message-extra">${renderMessageExtras(message)}</div>
   `;
@@ -2018,6 +2247,8 @@ function updateMessage(messageId, content, message = null) {
   if (live) live.innerHTML = renderLiveIntro(renderTarget);
   const process = article.querySelector(".message-process");
   if (process) process.innerHTML = renderTarget.role === "assistant" ? renderProcessEvents(renderTarget.processEvents || []) : "";
+  const reasoning = article.querySelector(".message-reasoning");
+  if (reasoning) reasoning.innerHTML = renderReasoningSummary(renderTarget);
   const body = article.querySelector(".message-body");
   if (body) {
     body.classList.toggle("is-empty", !visibleContent);
@@ -2030,7 +2261,13 @@ function updateMessage(messageId, content, message = null) {
   scrollMessages();
 }
 
-function scrollMessages() {
+function isNearMessageBottom() {
+  const remaining = el.messageStream.scrollHeight - el.messageStream.scrollTop - el.messageStream.clientHeight;
+  return remaining < 72;
+}
+
+function scrollMessages(force = false) {
+  if (!force && !state.followLatestMessage) return;
   el.messageStream.scrollTop = el.messageStream.scrollHeight;
 }
 
@@ -2106,17 +2343,83 @@ async function loadSystem() {
 }
 
 async function loadToolState(projectId = state.activeProject?.id) {
-  const [plugins, mcp, codex] = await Promise.allSettled([
+  const [plugins, mcp, codex, social] = await Promise.allSettled([
     api("/api/plugins"),
     api("/api/mcp"),
-    projectId ? api(`/api/workspace/codex?projectId=${encodeURIComponent(projectId)}`) : Promise.resolve(null)
+    projectId ? api(`/api/workspace/codex?projectId=${encodeURIComponent(projectId)}`) : Promise.resolve(null),
+    api("/api/social/status")
   ]);
   if (plugins.status === "fulfilled") state.plugins = plugins.value.plugins || [];
   if (mcp.status === "fulfilled") state.mcp = mcp.value;
   if (codex.status === "fulfilled") state.codex = codex.value;
+  if (social.status === "fulfilled") state.socialOps = social.value;
   renderWorkspacePanel();
   renderTopBar();
   renderSidebarVitals();
+}
+
+async function refreshSocialOps() {
+  try {
+    state.socialOps = await api("/api/social/status");
+  } catch {
+    state.socialOps = null;
+  }
+  renderWorkspacePanel();
+}
+
+async function startSocialCampaignFromPrompt() {
+  const topic = el.promptInput.value.trim();
+  if (!topic) {
+    el.promptInput.value = "SNS自動運用: Nexaの新機能をX / Instagram / TikTok / YouTube向けに7日分作って";
+    autoresize();
+    setStatus("SNS運用の内容を入力してからもう一度押してください");
+    el.promptInput.focus();
+    return;
+  }
+  setStatus("SNS運用案を作成中");
+  state.liveAgents = [
+    { id: "orchestrator", name: "Nexa", status: "running", model: "social" },
+    { id: "planner", name: "Nexa", status: "running", model: "calendar" },
+    { id: "response", name: "Nexa", status: "running", model: "copy" }
+  ];
+  renderWorkspacePanel();
+  try {
+    const result = await api("/api/social/campaigns", {
+      method: "POST",
+      body: {
+        projectId: state.activeProject?.id || "",
+        topic,
+        platforms: ["x", "instagram", "tiktok", "youtube", "threads"],
+        days: 7
+      }
+    });
+    state.socialOps = result.store;
+    state.liveAgents = [
+      { id: "orchestrator", name: "Nexa", status: "ready", model: "social" },
+      { id: "planner", name: "Nexa", status: "ready", model: `${result.posts?.length || 0} posts` },
+      { id: "verifier", name: "Nexa", status: "ready", model: "approval queue" }
+    ];
+    setStatus(`SNS運用案を${result.posts?.length || 0}件作成しました`);
+  } catch (error) {
+    setStatus(`SNS運用エラー: ${error.message}`);
+  }
+  renderWorkspacePanel();
+}
+
+async function updateSocialPostAction(postId, action) {
+  if (!postId || state.busy) return;
+  setStatus(action === "publish" ? "SNS投稿を公開済みに記録中" : "SNS投稿を承認中");
+  try {
+    const result = await api(`/api/social/posts/${encodeURIComponent(postId)}/${action}`, {
+      method: "POST",
+      body: {}
+    });
+    state.socialOps = result.store;
+    setStatus(action === "publish" ? "SNS投稿を手動公開済みにしました" : "SNS投稿を承認しました");
+  } catch (error) {
+    setStatus(`SNS操作エラー: ${error.message}`);
+  }
+  renderWorkspacePanel();
 }
 
 async function loadProjects(preferredId = localStorage.getItem("agent-company-project")) {
@@ -2139,7 +2442,7 @@ async function createProject() {
     body: {
       name: "新しいチャット",
       goal: CHAT_GOAL,
-      mode: savedProjectMode(),
+      mode: "",
       accessLevel: "default"
     }
   });
@@ -2173,6 +2476,10 @@ async function selectProject(projectId) {
   renderProjectList();
   renderMessages();
   updateComposerModeButton();
+  if (window.matchMedia("(max-width: 860px)").matches) {
+    state.leftCollapsed = true;
+    applyLayoutState();
+  }
   loadToolState(projectId).catch(() => {
     renderWorkspacePanel();
   });
@@ -2325,7 +2632,7 @@ function isWorkspaceWriteRequest(value = "") {
     /コード|アプリ|サイト|画面|ui|実装|作成|開発|修正|改善|ファイル|書いて|書き換え|追加|直して|バグ|エラー/.test(value);
 }
 
-async function sendPrompt() {
+async function sendPrompt(requestOptions = {}) {
   if (state.busy) {
     stopGeneration();
     return;
@@ -2333,6 +2640,8 @@ async function sendPrompt() {
   let message = el.promptInput.value.trim();
   if (!message && state.attachments.length) message = "添付内容を参考に要点を教えてください。";
   if (!message || !state.activeProject) return;
+  resolvePendingChoiceRequest();
+  state.followLatestMessage = true;
   const mode = projectMode();
   if (!mode) {
     setStatus("先にモードを選択してください");
@@ -2400,7 +2709,8 @@ async function sendPrompt() {
           modelChoice: state.modelChoice,
           performance: state.performanceChoice,
           reasoningLevel: state.reasoningLevel,
-          planMode: state.planMode
+          planMode: state.planMode,
+          choiceResolution: requestOptions.choiceResolution || null
         }
       })
     });
@@ -2616,11 +2926,22 @@ el.folderPanel.addEventListener("click", (event) => {
 });
 
 el.messageStream.addEventListener("click", (event) => {
+  const fileButton = event.target.closest("[data-open-workspace-file]");
+  if (fileButton) {
+    event.preventDefault();
+    openWorkspaceFilePreview(fileButton.dataset.openWorkspaceFile || "");
+    return;
+  }
+
   const choiceButton = event.target.closest("[data-choice-action]");
   if (choiceButton) {
+    resolvePendingChoiceRequest();
     const action = choiceButton.dataset.choiceAction || "send-prompt";
     const prompt = choiceButton.dataset.choicePrompt || "";
     const mode = choiceButton.dataset.choiceMode || "";
+    const choiceRequestId = choiceButton.closest("[data-choice-request]")?.dataset.choiceRequest || "";
+    const choiceOptionId = choiceButton.dataset.choiceOption || "";
+    const choiceResolution = { requestId: choiceRequestId, optionId: choiceOptionId, action };
     if (action === "folder-picker") {
       pickLocalWorkspaceFolder();
       return;
@@ -2631,7 +2952,7 @@ el.messageStream.addEventListener("click", (event) => {
           if (!prompt) return;
           el.promptInput.value = prompt;
           autoresize();
-          return sendPrompt();
+          return sendPrompt({ choiceResolution });
         })
         .catch((error) => setStatus(error.message));
       return;
@@ -2639,7 +2960,7 @@ el.messageStream.addEventListener("click", (event) => {
     if (prompt) {
       el.promptInput.value = prompt;
       autoresize();
-      sendPrompt();
+      sendPrompt({ choiceResolution });
     }
     return;
   }
@@ -2661,6 +2982,10 @@ el.messageStream.addEventListener("click", (event) => {
     pickLocalWorkspaceFolder();
   }
 });
+
+el.messageStream.addEventListener("scroll", () => {
+  state.followLatestMessage = isNearMessageBottom();
+}, { passive: true });
 
 el.featurePanel.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -2692,6 +3017,11 @@ el.featurePanel.addEventListener("click", (event) => {
   if (option.dataset.feature === "image") {
     setFeaturePanelOpen(false);
     setGenerationMode("image");
+    return;
+  }
+  if (option.dataset.feature === "social") {
+    setFeaturePanelOpen(false);
+    startSocialCampaignFromPrompt();
     return;
   }
   if (option.dataset.feature === "memory") {
@@ -2744,12 +3074,14 @@ el.modelMenu?.addEventListener("click", (event) => {
 
 el.leftSidebarToggle?.addEventListener("click", () => {
   state.leftCollapsed = !state.leftCollapsed;
+  if (window.matchMedia("(max-width: 860px)").matches && !state.leftCollapsed) state.rightCollapsed = true;
   localStorage.setItem("agent-company-left-collapsed", String(state.leftCollapsed));
   applyLayoutState();
 });
 
 el.rightSidebarToggle?.addEventListener("click", () => {
   state.rightCollapsed = !state.rightCollapsed;
+  if (window.matchMedia("(max-width: 860px)").matches && !state.rightCollapsed) state.leftCollapsed = true;
   localStorage.setItem("agent-company-right-collapsed", String(state.rightCollapsed));
   applyLayoutState();
 });
@@ -2894,8 +3226,27 @@ document.addEventListener("click", (event) => {
     closeArtifactPreview();
     return;
   }
+  if (event.target.closest("[data-close-file-preview]")) {
+    closeWorkspaceFilePreview();
+    return;
+  }
   if (event.target.closest("[data-review-changes]")) {
     showChangesReviewStatus();
+  }
+  const socialCreate = event.target.closest("[data-social-create]");
+  if (socialCreate) {
+    startSocialCampaignFromPrompt();
+    return;
+  }
+  const socialApprove = event.target.closest("[data-social-approve]");
+  if (socialApprove) {
+    updateSocialPostAction(socialApprove.dataset.socialApprove, "approve");
+    return;
+  }
+  const socialPublish = event.target.closest("[data-social-publish]");
+  if (socialPublish) {
+    updateSocialPostAction(socialPublish.dataset.socialPublish, "publish");
+    return;
   }
   if (event.target.closest("#toolbarModel") || event.target.closest("#modelLabel")) {
     setModelMenuOpen(true);
@@ -2932,6 +3283,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     closeArtifactPreview();
+    closeWorkspaceFilePreview();
   }
   if (event.key === "Escape" && state.projectMenuId) {
     closeProjectMenu();
@@ -2951,6 +3303,10 @@ el.composer.addEventListener("submit", (event) => {
 });
 
 async function init() {
+  if (window.matchMedia("(max-width: 860px)").matches) {
+    state.leftCollapsed = true;
+    state.rightCollapsed = true;
+  }
   applyLayoutState();
   setBusy(false);
   renderFeaturePanel();

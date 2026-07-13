@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
+import { createNexaPipeline, pipelineSummary } from "./nexa-pipeline.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,11 +35,15 @@ const GENERATED_IMAGES_DIR = path.join(GENERATED_DIR, "images");
 const GENERATED_VIDEOS_DIR = path.join(GENERATED_DIR, "videos");
 const WORKSPACE_BASELINE = path.join(DATA_DIR, "workspace-baseline.json");
 const AUTH_FILE = path.join(DATA_DIR, "auth.json");
+const SOCIAL_OPS_FILE = path.join(DATA_DIR, "social-ops.json");
 const PLUGINS_DIR = path.join(ROOT, "plugins");
 const MCP_CONFIG = path.join(ROOT, "mcp.servers.json");
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
+// Templates are legacy-only. Nexa now requires model-authored code unless an
+// operator explicitly opts back into the old emergency fallback.
+const AI_CODE_GENERATION_ONLY = process.env.NEXA_TEMPLATE_FALLBACK !== "true";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -47,7 +52,7 @@ const OPENAI_AUTO_ROUTE = process.env.OPENAI_AUTO_ROUTE !== "false";
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, "");
 const SESSION_COOKIE = "nexa_session";
 const OAUTH_STATE_COOKIE = "nexa_oauth_state";
-const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
+const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 90));
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || "";
 const STRIPE_PRICE_IDS = Object.freeze({
@@ -99,19 +104,63 @@ const LTX_DIFFUSERS_STEPS = Math.max(4, Number(process.env.LTX_DIFFUSERS_STEPS |
 const LTX_DIFFUSERS_FPS = Math.max(8, Number(process.env.LTX_DIFFUSERS_FPS || 24));
 const WORKSPACE_IGNORE = new Set([".git", "node_modules", ".playwright-cli", "output"]);
 const TEXT_EXTENSIONS = new Set([
+  ".c",
+  ".bat",
+  ".cc",
+  ".cmd",
+  ".conf",
+  ".cpp",
+  ".cs",
   ".css",
   ".csv",
+  ".dart",
+  ".env",
+  ".go",
+  ".h",
+  ".hpp",
   ".html",
+  ".ini",
+  ".java",
   ".js",
+  ".jsx",
   ".json",
+  ".kt",
+  ".kts",
   ".md",
   ".mjs",
+  ".php",
+  ".properties",
+  ".ps1",
+  ".py",
+  ".rb",
+  ".rs",
+  ".scss",
+  ".sh",
+  ".sql",
   ".svg",
+  ".svelte",
+  ".swift",
+  ".toml",
   ".ts",
+  ".tsx",
   ".txt",
+  ".vue",
   ".xml",
   ".yaml",
   ".yml"
+]);
+const TEXT_FILE_NAMES = new Set([
+  ".dockerignore",
+  ".editorconfig",
+  ".env",
+  ".env.example",
+  ".gitattributes",
+  ".gitignore",
+  "dockerfile",
+  "gemfile",
+  "license",
+  "makefile",
+  "procfile"
 ]);
 
 const AUTO_CONTEXT_RULES = [
@@ -156,38 +205,56 @@ const SHELL_DENY_PATTERNS = [
 
 const CHAT_MODES = new Set(["", "code", "chat", "both"]);
 const ACCESS_LEVELS = new Set(["full", "safety", "default"]);
+const SOCIAL_PLATFORM_DEFS = [
+  { id: "x", name: "X", maxLength: 280, tone: "short" },
+  { id: "instagram", name: "Instagram", maxLength: 2200, tone: "visual" },
+  { id: "tiktok", name: "TikTok", maxLength: 2200, tone: "hook" },
+  { id: "youtube", name: "YouTube", maxLength: 5000, tone: "video" },
+  { id: "threads", name: "Threads", maxLength: 500, tone: "conversation" },
+  { id: "facebook", name: "Facebook", maxLength: 2000, tone: "community" },
+  { id: "linkedin", name: "LinkedIn", maxLength: 3000, tone: "professional" }
+];
+const SOCIAL_PLATFORM_IDS = new Set(SOCIAL_PLATFORM_DEFS.map((platform) => platform.id));
 const AGENT_BRAND_NAMES = {
-  orchestrator: "Astra",
-  planner: "Lattice",
-  memory: "Mneme",
-  toolRouter: "Navi",
-  reasoner: "Helix",
-  coder: "Forge",
-  researcher: "Quanta",
-  strategist: "Sage",
-  secondOpinion: "Mira",
-  critic: "Prism",
-  verifier: "Proof",
-  selfEvaluator: "Vela",
-  security: "Sentinel",
-  responseGenerator: "Auralis",
-  chief: "Astra",
-  research: "Quanta",
-  architect: "Helix",
-  toolsmith: "Navi",
-  patch: "Forge",
-  directWrite: "Forge",
-  generator: "Lumen",
-  imageGenerator: "Lumen",
-  videoGenerator: "Kino"
+  orchestrator: "司令塔",
+  planner: "計画",
+  memory: "記憶",
+  toolRouter: "ツール",
+  toolrouter: "ツール",
+  reasoner: "推論",
+  coder: "コード",
+  researcher: "調査",
+  strategist: "設計",
+  secondOpinion: "別視点",
+  secondopinion: "別視点",
+  critic: "批評",
+  verifier: "検証",
+  selfEvaluator: "品質",
+  selfevaluator: "品質",
+  security: "安全",
+  responseGenerator: "応答",
+  responsegenerator: "応答",
+  chief: "司令塔",
+  research: "調査",
+  architect: "推論",
+  toolsmith: "ツール",
+  patch: "コード",
+  directWrite: "直接保存",
+  directwrite: "直接保存",
+  generator: "生成",
+  imageGenerator: "画像生成",
+  imagegenerator: "画像生成",
+  videoGenerator: "動画生成",
+  videogenerator: "動画生成",
+  checks: "エラー確認"
 };
 
 const SMARTNESS_BASELINE = {
   beforeLevel: 4.7,
-  afterLevel: 7.1,
-  maxHonestLevel: 7.3,
-  targetLevel: 7.8,
-  version: "nexa-chatgpt-grade-v7-choice-gate"
+  afterLevel: 7.4,
+  maxHonestLevel: 7.6,
+  targetLevel: 8.0,
+  version: "nexa-code-context-v8-postwrite-checks"
 };
 
 const BILLING_PLANS = [
@@ -265,13 +332,112 @@ function publicBillingPlans() {
   }));
 }
 
+function sanitizeNexaVisibleText(value = "") {
+  return String(value || "")
+    .replace(/\b(?:Astra|Lattice|Mneme|Navi|Helix|Forge|Quanta|Sage|Mira|Prism|Proof|Vela|Sentinel|Auralis|Lumen|Kino)\b/g, "Nexa")
+    .replace(/\b(?:ChatGPT|Claude(?:\s+Code)?|Claude|Opus|OpenAI|Sora)\b/gi, "Nexa")
+    .replace(/\bGPT(?:[-\s]?\d+(?:\.\d+)?)?\b/gi, "Nexa")
+    .replace(/Nexa-style/gi, "Nexa")
+    .replace(/Nexa級/g, "Nexa品質")
+    .replace(/Nexaそのもの/g, "Nexa");
+}
+
 function agentBrandName(id = "") {
-  return AGENT_BRAND_NAMES[id] || AGENT_BRAND_NAMES[String(id).replace(/[-_ ]([a-z])/gi, (_, char) => char.toUpperCase())] || id;
+  const raw = String(id || "");
+  const key = raw.replace(/[\s_-]+/g, "").toLowerCase();
+  return AGENT_BRAND_NAMES[raw] || AGENT_BRAND_NAMES[key] || "AI";
+}
+
+function publicModelName(model = "") {
+  const clean = String(model || "").trim().toLowerCase();
+  if (!clean) return "Nexa";
+  if (clean.includes("code") || clean.includes("coder") || clean.includes("deepseek") || clean.includes("codellama")) return "Nexa2.5";
+  if (clean.includes("qwen3") || clean.includes("4b") || clean.includes("smart")) return "Nexa2.0";
+  if (clean.includes("llama") || clean.includes("gemma")) return "Nexa1.5";
+  if (clean.includes("fast") || clean.includes("qwen2.5") || clean.includes("fallback") || clean.includes("rules")) return "Nexa1.0";
+  if (clean.includes("cloud") || clean.startsWith("openai:")) return "Nexa2.5";
+  return "Nexa";
+}
+
+function userVisibleWriteIssue(error = "") {
+  const text = String(error || "");
+  if (/writable_file_block_or_valid_diff_not_found|file block|valid diff/i.test(text)) {
+    return "保存形式が不安定だったため、自動補完へ切り替えます。";
+  }
+  if (/workspace_text_file_required/i.test(text)) return "テキストとして保存できるファイルへ補正します。";
+  if (/workspace_file_required/i.test(text)) return "選択フォルダー内の有効なファイルへ補正します。";
+  return sanitizeNexaVisibleText(text || "書き込み形式を修正しています。");
 }
 
 function normalizeChatMode(value) {
   const mode = String(value || "").toLowerCase();
   return CHAT_MODES.has(mode) ? mode : "";
+}
+
+function modeLabel(mode = "") {
+  return {
+    chat: "チャットモード",
+    code: "コードモード",
+    both: "両方モード"
+  }[normalizeChatMode(mode)] || "モード未選択";
+}
+
+function applyProjectModeToRoute(project = null, route = {}, userText = "") {
+  const mode = normalizeChatMode(project?.mode);
+  const adjusted = {
+    ...(route || {}),
+    mode,
+    modeLabel: modeLabel(mode),
+    modeForcedChat: false,
+    modeForcedCode: false
+  };
+  adjusted.intent ||= analyzeUserIntent(userText, project);
+
+  if (mode === "chat") {
+    adjusted.needsCode = false;
+    adjusted.modeForcedChat = true;
+    adjusted.isComplex = Boolean(adjusted.isComplex || adjusted.intent?.isTerse || adjusted.intent?.needsResearch);
+    adjusted.intent = {
+      ...adjusted.intent,
+      taskKind: adjusted.intent?.videoUnsupported
+        ? "media_generation_unsupported"
+        : adjusted.intent?.needsResearch
+        ? adjusted.intent.taskKind
+        : "chat",
+      needsCode: false,
+      needsWorkspaceContext: false,
+      projectState: {
+        ...(adjusted.intent?.projectState || {}),
+        mode
+      }
+    };
+  } else if (mode === "code") {
+    adjusted.needsCode = true;
+    adjusted.modeForcedCode = true;
+    adjusted.isComplex = true;
+    adjusted.intent = {
+      ...adjusted.intent,
+      needsCode: true,
+      needsWorkspaceContext: true,
+      projectState: {
+        ...(adjusted.intent?.projectState || {}),
+        mode
+      }
+    };
+  } else if (mode === "both") {
+    adjusted.needsCode = Boolean(adjusted.needsCode || adjusted.intent?.needsCode);
+    adjusted.intent = {
+      ...adjusted.intent,
+      needsCode: adjusted.needsCode,
+      needsWorkspaceContext: Boolean(adjusted.intent?.needsWorkspaceContext || adjusted.needsCode),
+      projectState: {
+        ...(adjusted.intent?.projectState || {}),
+        mode
+      }
+    };
+  }
+
+  return adjusted;
 }
 
 function normalizeAccessLevel(value) {
@@ -288,24 +454,24 @@ function folderNameFromWorkspace(folder = "") {
 function codexPermissionForAccess(level) {
   return {
     full: "full-access",
-    safety: "workspace-write",
-    default: "auto"
-  }[normalizeAccessLevel(level)] || "auto";
+    safety: "danger-approval",
+    default: "always-approval"
+  }[normalizeAccessLevel(level)] || "always-approval";
 }
 
 const AGENTS = [
   {
     id: "chief",
-    name: "Astra",
+    name: "司令塔",
     title: "統括",
     kind: "fast",
     color: "#0071e3",
     system:
-      "あなたはAstraです。ユーザーの意図、制約、次の一手を整理します。結論優先で、日本語で短く実務的に返してください。隠れた推論は出さず、必要な根拠だけ示します。"
+      "あなたはNexaです。ユーザーの意図、制約、次の一手を整理します。結論優先で、日本語で短く実務的に返してください。隠れた推論は出さず、必要な根拠だけ示します。"
   },
   {
     id: "research",
-    name: "Quanta",
+    name: "調査",
     title: "調査",
     kind: "fast",
     color: "#34c759",
@@ -314,7 +480,7 @@ const AGENTS = [
   },
   {
     id: "architect",
-    name: "Helix",
+    name: "推論",
     title: "設計",
     kind: "code",
     color: "#ff9f0a",
@@ -323,7 +489,7 @@ const AGENTS = [
   },
   {
     id: "toolsmith",
-    name: "Navi",
+    name: "ツール",
     title: "実行",
     kind: "fast",
     color: "#ff375f",
@@ -332,7 +498,7 @@ const AGENTS = [
   },
   {
     id: "memory",
-    name: "Mneme",
+    name: "記憶",
     title: "記憶",
     kind: "fast",
     color: "#5856d6",
@@ -360,6 +526,226 @@ function id(prefix = "id") {
 
 function now() {
   return new Date().toISOString();
+}
+
+function defaultSocialOpsStore() {
+  return {
+    version: 1,
+    accounts: [],
+    campaigns: [],
+    posts: [],
+    updatedAt: now()
+  };
+}
+
+async function readSocialOpsStore() {
+  const store = await readJson(SOCIAL_OPS_FILE, defaultSocialOpsStore());
+  store.version ||= 1;
+  store.accounts = Array.isArray(store.accounts) ? store.accounts : [];
+  store.campaigns = Array.isArray(store.campaigns) ? store.campaigns : [];
+  store.posts = Array.isArray(store.posts) ? store.posts : [];
+  return store;
+}
+
+async function writeSocialOpsStore(store) {
+  store.updatedAt = now();
+  await writeJson(SOCIAL_OPS_FILE, store);
+  return store;
+}
+
+function publicSocialPlatformDefs() {
+  return SOCIAL_PLATFORM_DEFS.map((platform) => ({
+    ...platform,
+    providerConfigured: false,
+    autoPublishReady: false,
+    note: "OAuth/API連携を設定すると実投稿に切り替えられます"
+  }));
+}
+
+function normalizeSocialPlatforms(value) {
+  const list = Array.isArray(value) ? value : String(value || "").split(/[, ]+/);
+  const platforms = list
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter((item) => SOCIAL_PLATFORM_IDS.has(item));
+  return [...new Set(platforms)].slice(0, SOCIAL_PLATFORM_DEFS.length);
+}
+
+function socialPlatformDef(platformId) {
+  return SOCIAL_PLATFORM_DEFS.find((platform) => platform.id === platformId) || SOCIAL_PLATFORM_DEFS[0];
+}
+
+function socialText(value, max = 1200) {
+  return clip(String(value || "").replace(/\s+/g, " ").trim(), max);
+}
+
+function topicKeywords(topic = "") {
+  const clean = socialText(topic, 240);
+  return clean
+    .split(/[\s,.;:!?'"()[\]{}<>。、！？「」『』【】・]+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 2)
+    .slice(0, 5);
+}
+
+function socialHashtags(topic = "", platform = "x") {
+  const tags = topicKeywords(topic)
+    .map((word) => word.replace(/[^\p{L}\p{N}_]/gu, ""))
+    .filter(Boolean)
+    .slice(0, platform === "x" ? 2 : 4);
+  const defaults = platform === "linkedin" ? ["Nexa", "AI"] : ["Nexa", "AI開発"];
+  return [...new Set([...tags, ...defaults])].slice(0, platform === "x" ? 3 : 5).map((tag) => `#${tag}`);
+}
+
+function makeSocialDraftContent({ topic, platform, day, projectName }) {
+  const cleanTopic = socialText(topic || "Nexaのアップデート", 280);
+  const name = projectName ? socialText(projectName, 80) : "Nexa";
+  const tags = socialHashtags(cleanTopic, platform).join(" ");
+  const templates = {
+    x: `${name} update ${day}: ${cleanTopic}\n\n今日のポイントを1つに絞って、すぐ試せる形で共有します。${tags}`,
+    instagram: `${cleanTopic}\n\n見せ方のポイント:\n1. Before/Afterを1枚目に置く\n2. 開発ログを短く重ねる\n3. 最後に保存したくなる一言を入れる\n\n${tags}`,
+    tiktok: `冒頭3秒: 「${clip(cleanTopic, 48)}」\n\n構成:\n- 問題を一言で見せる\n- Nexaで直す過程を高速表示\n- 最後に完成画面を見せる\n\n${tags}`,
+    youtube: `タイトル案: ${clip(cleanTopic, 70)}\n\n説明文:\n${name}で実装から確認まで進める流れを紹介します。\n\nチャプター:\n00:00 目的\n00:20 実装ログ\n01:10 結果確認\n\n${tags}`,
+    threads: `${cleanTopic}\n\n開発中に迷いやすい部分を、Nexaのログと一緒に短くまとめます。${tags}`,
+    facebook: `${cleanTopic}\n\nNexaで進めた作業の要点、使いどころ、次に試す改善をまとめました。\n${tags}`,
+    linkedin: `${cleanTopic}\n\n開発生産性の観点では、作業ログ、検証、承認フローを1つのワークスペースにまとめることが重要です。\n\n${tags}`
+  };
+  const def = socialPlatformDef(platform);
+  return clip(templates[platform] || templates.x, Math.max(120, def.maxLength));
+}
+
+function socialScheduleAt(day, platformIndex) {
+  const date = new Date(Date.now() + day * 24 * 60 * 60 * 1000);
+  date.setHours(9 + (platformIndex % 4) * 3, platformIndex % 2 ? 30 : 0, 0, 0);
+  return date.toISOString();
+}
+
+function socialStats(store) {
+  const posts = store.posts || [];
+  return {
+    accounts: (store.accounts || []).length,
+    campaigns: (store.campaigns || []).length,
+    queued: posts.filter((post) => post.status === "queued").length,
+    approved: posts.filter((post) => post.status === "approved").length,
+    published: posts.filter((post) => post.status === "published").length,
+    canceled: posts.filter((post) => post.status === "canceled").length
+  };
+}
+
+function publicSocialStore(store) {
+  return {
+    platforms: publicSocialPlatformDefs(),
+    accounts: (store.accounts || []).map((account) => ({
+      id: account.id,
+      platform: account.platform,
+      handle: account.handle,
+      displayName: account.displayName || account.handle,
+      providerConfigured: Boolean(account.providerConfigured),
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt
+    })),
+    campaigns: (store.campaigns || []).slice(-20).reverse(),
+    posts: (store.posts || []).slice(-80).reverse(),
+    stats: socialStats(store),
+    updatedAt: store.updatedAt || now()
+  };
+}
+
+async function createSocialCampaign(body = {}) {
+  const store = await readSocialOpsStore();
+  const project = body.projectId ? await getProject(body.projectId) : null;
+  if (body.projectId && !project) {
+    const error = new Error("project_not_found");
+    error.status = 404;
+    throw error;
+  }
+  const topic = socialText(body.topic || body.prompt || body.message || "", 900);
+  if (!topic) {
+    const error = new Error("social_topic_required");
+    error.status = 400;
+    throw error;
+  }
+  const platforms = normalizeSocialPlatforms(body.platforms);
+  const selectedPlatforms = platforms.length ? platforms : ["x", "instagram", "tiktok", "youtube", "threads"];
+  const days = Math.min(30, Math.max(1, Math.floor(Number(body.days || 7))));
+  const campaign = {
+    id: id("social_campaign"),
+    projectId: project?.id || "",
+    projectName: project?.name || "",
+    title: socialText(body.title || topic, 90),
+    topic,
+    platforms: selectedPlatforms,
+    days,
+    status: "drafting",
+    createdAt: now(),
+    updatedAt: now()
+  };
+  const posts = [];
+  for (let day = 1; day <= days; day += 1) {
+    selectedPlatforms.forEach((platform, platformIndex) => {
+      posts.push({
+        id: id("social_post"),
+        campaignId: campaign.id,
+        projectId: campaign.projectId,
+        platform,
+        title: `${socialPlatformDef(platform).name} day ${day}`,
+        content: makeSocialDraftContent({ topic, platform, day, projectName: campaign.projectName }),
+        scheduledAt: socialScheduleAt(day, platformIndex),
+        status: "queued",
+        approvalRequired: true,
+        providerConfigured: false,
+        createdAt: now(),
+        updatedAt: now()
+      });
+    });
+  }
+  campaign.status = "ready";
+  campaign.postCount = posts.length;
+  campaign.updatedAt = now();
+  store.campaigns.push(campaign);
+  store.posts.push(...posts);
+  await writeSocialOpsStore(store);
+  return { campaign, posts, store: publicSocialStore(store) };
+}
+
+async function updateSocialPost(postId, patch = {}) {
+  const store = await readSocialOpsStore();
+  const post = store.posts.find((item) => item.id === postId);
+  if (!post) {
+    const error = new Error("social_post_not_found");
+    error.status = 404;
+    throw error;
+  }
+  if ("content" in patch) post.content = socialText(patch.content, socialPlatformDef(post.platform).maxLength);
+  if ("scheduledAt" in patch) post.scheduledAt = new Date(patch.scheduledAt || post.scheduledAt).toISOString();
+  if ("status" in patch && ["queued", "approved", "published", "canceled"].includes(String(patch.status))) {
+    post.status = String(patch.status);
+  }
+  post.updatedAt = now();
+  await writeSocialOpsStore(store);
+  return { post, store: publicSocialStore(store) };
+}
+
+async function addSocialAccount(body = {}) {
+  const platform = normalizeSocialPlatforms([body.platform])[0];
+  const handle = socialText(body.handle || body.username || "", 80);
+  if (!platform || !handle) {
+    const error = new Error("social_account_required");
+    error.status = 400;
+    throw error;
+  }
+  const store = await readSocialOpsStore();
+  const account = {
+    id: id("social_account"),
+    platform,
+    handle,
+    displayName: socialText(body.displayName || handle, 80),
+    providerConfigured: false,
+    createdAt: now(),
+    updatedAt: now()
+  };
+  store.accounts.push(account);
+  await writeSocialOpsStore(store);
+  return { account, store: publicSocialStore(store) };
 }
 
 function loadEnvFile(filePath) {
@@ -814,6 +1200,13 @@ function createSession(req, user) {
   return { token, session };
 }
 
+function desktopSessionPayload(token, session) {
+  return NEXA_DESKTOP ? {
+    desktopSessionToken: token,
+    sessionExpiresAt: session.expiresAt
+  } : {};
+}
+
 function cleanupDesktopOauthStates() {
   const cutoff = Date.now() - 10 * 60 * 1000;
   for (const [state, record] of DESKTOP_OAUTH_STATES.entries()) {
@@ -1112,6 +1505,9 @@ function projectRelativeWorkspacePath(project, file) {
 }
 
 function projectScopedWorkspacePath(project, input = "") {
+  if (normalizeAccessLevel(project?.accessLevel) === "full" && isAbsoluteLocalPath(input)) {
+    return path.resolve(normalizeLocalFolderPath(input));
+  }
   const rel = cleanWorkspaceFilePath(input);
   const root = project?.workspaceReady ? normalizeWorkspaceFolder(project) : "";
   if (project?.workspaceReady && isAbsoluteLocalPath(root)) {
@@ -1212,6 +1608,7 @@ function assertWorkspaceReadyForWrite(project, dryRun = false) {
 
 function isWorkspaceIgnored(name, rel = "") {
   if (WORKSPACE_IGNORE.has(name)) return true;
+  if (String(name || "").startsWith(".nexa-backup-")) return true;
   const normalized = rel.replace(/\\/g, "/");
   if (normalized === "data" || normalized.startsWith("data/")) return true;
   if (normalized === "output" || normalized.startsWith("output/")) return true;
@@ -1223,7 +1620,8 @@ function isWorkspaceIgnored(name, rel = "") {
 }
 
 function isTextFile(file) {
-  return TEXT_EXTENSIONS.has(path.extname(file).toLowerCase());
+  const name = path.basename(file).toLowerCase();
+  return TEXT_FILE_NAMES.has(name) || TEXT_EXTENSIONS.has(path.extname(file).toLowerCase());
 }
 
 async function ensureData() {
@@ -1234,6 +1632,7 @@ async function ensureData() {
   await mkdir(GENERATED_VIDEOS_DIR, { recursive: true });
   await mkdir(PLUGINS_DIR, { recursive: true });
   await writeAuthStore(await readAuthStore());
+  await writeSocialOpsStore(await readSocialOpsStore());
 
   const indexFile = path.join(PROJECTS_DIR, "index.json");
   const index = await readJson(indexFile, null);
@@ -1421,7 +1820,7 @@ function normalizeCodexState(project) {
   const codex = project.codex || {};
   const goal = codex.goal || {};
   const memories = codex.memories || {};
-  const allowedPermissions = new Set(["read-only", "workspace-write", "auto", "full-access"]);
+  const allowedPermissions = new Set(["read-only", "workspace-write", "auto", "full-access", "danger-approval", "always-approval"]);
   const reviewComments = Array.isArray(codex.reviewComments) ? codex.reviewComments : [];
   const approvals = Array.isArray(codex.approvals) ? codex.approvals : [];
   project.codex = {
@@ -1430,7 +1829,7 @@ function normalizeCodexState(project) {
       status: ["active", "paused", "done", "idle"].includes(goal.status) ? goal.status : (goal.text ? "active" : "idle"),
       updatedAt: String(goal.updatedAt || createdAt)
     },
-    permissions: allowedPermissions.has(codex.permissions) ? codex.permissions : "workspace-write",
+    permissions: allowedPermissions.has(codex.permissions) ? codex.permissions : codexPermissionForAccess(project.accessLevel),
     memories: {
       use: memories.use !== false,
       generate: memories.generate !== false
@@ -1652,6 +2051,63 @@ async function getOllamaModels() {
   return Array.isArray(data.models) ? data.models : [];
 }
 
+let ollamaStartPromise = null;
+let ollamaLastStartAttempt = 0;
+
+function localOllamaExecutable() {
+  const candidates = [
+    process.env.OLLAMA_EXE,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Ollama", "ollama.exe") : "",
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Ollama", "ollama.exe") : ""
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(candidate)) || "ollama";
+}
+
+async function ensureOllamaOnline() {
+  try {
+    await getOllamaModels();
+    return true;
+  } catch {
+    // Continue to local startup only for the standard local endpoint.
+  }
+  let endpoint;
+  try {
+    endpoint = new URL(OLLAMA_URL);
+  } catch {
+    return false;
+  }
+  if (!["127.0.0.1", "localhost"].includes(endpoint.hostname)) return false;
+  if (ollamaStartPromise) return ollamaStartPromise;
+  if (Date.now() - ollamaLastStartAttempt < 30000) return false;
+  ollamaLastStartAttempt = Date.now();
+  ollamaStartPromise = (async () => {
+    try {
+      const child = spawn(localOllamaExecutable(), ["serve"], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        env: { ...process.env, OLLAMA_HOST: `${endpoint.hostname}:${endpoint.port || "11434"}` }
+      });
+      child.unref();
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        try {
+          await getOllamaModels();
+          return true;
+        } catch {
+          // Keep waiting while Ollama initializes.
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      ollamaStartPromise = null;
+    }
+  })();
+  return ollamaStartPromise;
+}
+
 function modelName(model) {
   return model?.name || model?.model || "";
 }
@@ -1677,22 +2133,22 @@ function cloudLlmProfile() {
   const enabled = Boolean(OPENAI_API_KEY && OPENAI_AUTO_ROUTE);
   return {
     enabled,
-    provider: "openai-compatible",
-    baseUrl: OPENAI_BASE_URL,
+    provider: "cloud-compatible",
+    baseUrl: enabled ? "configured" : "",
     conversation: enabled ? cloudModelId(OPENAI_CHAT_MODEL) : "",
     code: enabled ? cloudModelId(OPENAI_CODE_MODEL) : "",
     fast: "",
     models: enabled
       ? [
-          { name: cloudModelId(OPENAI_CHAT_MODEL), model: OPENAI_CHAT_MODEL, capabilities: ["completion", "tools"], details: { family: "openai-compatible" } },
+          { name: cloudModelId(OPENAI_CHAT_MODEL), model: OPENAI_CHAT_MODEL, capabilities: ["completion", "tools"], details: { family: "cloud-compatible" } },
           OPENAI_CODE_MODEL !== OPENAI_CHAT_MODEL
-            ? { name: cloudModelId(OPENAI_CODE_MODEL), model: OPENAI_CODE_MODEL, capabilities: ["completion", "tools"], details: { family: "openai-compatible" } }
+            ? { name: cloudModelId(OPENAI_CODE_MODEL), model: OPENAI_CODE_MODEL, capabilities: ["completion", "tools"], details: { family: "cloud-compatible" } }
             : null
         ].filter(Boolean)
       : [],
     note: enabled
       ? "High-quality cloud routing is available for Nexa2.0/Nexa2.5."
-      : "Set OPENAI_API_KEY to enable high-quality cloud routing."
+      : "クラウドAPIキーを設定すると高品質ルーティングを有効化できます。"
   };
 }
 
@@ -1745,7 +2201,7 @@ function selectModel(models, kind, specs) {
     if (kind !== "fast" && size > 0 && size <= maxComfort) score += size * 2;
     if (size > maxComfort + 2) score -= 30;
     if ((model.capabilities || []).includes("tools")) score += 8;
-    if (kind === "conversation" && (model.capabilities || []).includes("thinking")) score -= 24;
+    if (kind === "conversation" && (model.capabilities || []).includes("thinking")) score += 4;
     if (name.includes("latest")) score += 1;
     return { model, score };
   });
@@ -1767,6 +2223,11 @@ function resolveRequestedModel(system, choice = "auto", fallbackKind = "conversa
   const nexaChoice = raw.toLowerCase();
   if (nexaChoice === "nexa-2.5") {
     return plan.code || plan.conversation || plan.fast || null;
+  }
+  if (nexaChoice === "nexa-3.0") {
+    return fallbackKind === "code"
+      ? (plan.code || plan.conversation || plan.fast || null)
+      : (plan.conversation || plan.code || plan.fast || null);
   }
   if (nexaChoice === "nexa-2.0") {
     return plan.conversation || plan.code || plan.fast || null;
@@ -1820,30 +2281,34 @@ function intelligenceProfile(project = null, system = {}) {
   const runs = Array.isArray(project?.runs) ? project.runs : [];
   const hasSelfEvalRun = runs.some((run) => run?.intelligence?.qualityGate || run?.quality?.score);
   const hasDeepRun = runs.some((run) => run?.intelligence?.deepReasoning || run?.deepReasoning?.enabled);
+  const hasPostWriteChecks = runs.some((run) => run?.type === "post-write-checks" || run?.type === "checks");
   let afterLevel = SMARTNESS_BASELINE.afterLevel;
   if (!ollamaOnline && !hasModelPlan) afterLevel -= 0.5;
   if (hasWorkspace) afterLevel += 0.1;
   if (memoryCount >= 8) afterLevel += 0.1;
   if (hasSelfEvalRun) afterLevel += 0.1;
   if (hasDeepRun) afterLevel += 0.1;
+  if (hasPostWriteChecks) afterLevel += 0.1;
   if (cloudReady) afterLevel += 0.4;
   afterLevel = Math.min(SMARTNESS_BASELINE.maxHonestLevel, Math.max(4.8, afterLevel));
 
   const capabilities = [
     { id: "llm", label: "LLM", ready: ollamaOnline || hasModelPlan, note: hasModelPlan ? "auto model routing" : "fallback only" },
-    { id: "cloudLlm", label: "Cloud LLM", ready: cloudReady, note: cloudReady ? "OpenAI-compatible high-quality routing" : "optional OPENAI_API_KEY not configured" },
+    { id: "cloudLlm", label: "Cloud LLM", ready: cloudReady, note: cloudReady ? "cloud-ready high-quality routing" : "optional cloud key not configured" },
     { id: "cloudFallback", label: "Cloud fallback", ready: true, note: "cloud failures fall back to local Ollama when available" },
     { id: "tools", label: "Tools", ready: true, note: "files, workspace, media, shell gates" },
     { id: "memory", label: "Memory", ready: memoryCount > 0, note: `${memoryCount} items` },
     { id: "memoryRetrieval", label: "Relevant memory", ready: true, note: "keyword-ranked project recall" },
-    { id: "multiAgent", label: "Multi-agent", ready: true, note: "Astra/Lattice/Sage/Mira/Forge/Prism/Proof/Vela" },
+    { id: "multiAgent", label: "Nexa team", ready: true, note: "Nexa internal workflow" },
     { id: "deepReasoning", label: "Deep reasoning", ready: true, note: "strategy + second opinion pass" },
     { id: "answerContract", label: "Answer contract", ready: true, note: "latest-request alignment + no hidden logs" },
-    { id: "chatGptGradeContract", label: "ChatGPT-grade contract", ready: true, note: "intent recovery + honest self-correction" },
+    { id: "nexaQualityContract", label: "Nexa quality contract", ready: true, note: "intent recovery + honest self-correction" },
     { id: "answerBlueprint", label: "Answer blueprint", ready: true, note: "required final-answer coverage before generation" },
     { id: "choiceGate", label: "Choice gate", ready: true, note: "ambiguous prompts become selectable actions instead of final-answer questions" },
     { id: "selfEval", label: "Self evaluation", ready: true, note: "score + revise gate" },
     { id: "multiPassQuality", label: "Multi-pass quality", ready: true, note: "rubric, hallucination, contradiction checks" },
+    { id: "codingContextMap", label: "Coding context map", ready: true, note: "framework, scripts, relevant files, and snapshots before Nexa writes" },
+    { id: "postWriteChecks", label: "Post-write checks", ready: true, note: "syntax and project checks after direct code writes" },
     { id: "imageOnlyMedia", label: "Image-only media", ready: true, note: "video generation disabled honestly" },
     { id: "autonomy", label: "Autonomous task", ready: hasWorkspace, note: hasWorkspace ? "workspace actions enabled" : "needs folder for direct code work" },
     { id: "aiOs", label: "AI OS", ready: hasWorkspace, note: "local PC/workspace control with safety checks" }
@@ -1859,8 +2324,8 @@ function intelligenceProfile(project = null, system = {}) {
     basis: "0-10 capability rubric: model routing, tools, relevant memory, multi-agent routing, deep reasoning, self-evaluation, autonomous workspace action, AI OS integration.",
     qualityGate: true,
     deepReasoning: true,
-    opusStyleWorkflow: true,
-    caveat: "This is a system workflow score, not a claim that the local model itself equals ChatGPT or Claude Opus.",
+    nexaDeepWorkflow: true,
+    caveat: "This is a system workflow score, not a claim that the local model itself equals every paid cloud model.",
     capabilities
   };
 }
@@ -1906,7 +2371,17 @@ async function systemProfile() {
     ollama.models = await getOllamaModels();
     ollama.online = true;
   } catch (error) {
-    ollama.error = error.message;
+    const started = await ensureOllamaOnline();
+    if (started) {
+      try {
+        ollama.models = await getOllamaModels();
+        ollama.online = true;
+      } catch (retryError) {
+        ollama.error = retryError.message;
+      }
+    } else {
+      ollama.error = error.message;
+    }
   }
 
   const cloud = cloudLlmProfile();
@@ -1927,7 +2402,7 @@ async function systemProfile() {
     media: {
       imageOnly: IMAGE_GENERATION_ONLY,
       imageProvider: "local-cinematic-image",
-      imageGenerator: "Lumen",
+      imageGenerator: "Nexa",
       disabledVideo: IMAGE_GENERATION_ONLY
     }
   };
@@ -2239,12 +2714,13 @@ async function* llmChatStream(model, messages, options = {}) {
 
 async function runAgent(agent, context, system, plan, send) {
   const model = plan[agent.kind] || plan.conversation || plan.fast;
+  const displayName = agentBrandName(agent.id);
   send("agent", {
     id: agent.id,
-    name: agent.name,
-    title: agent.title,
+    name: displayName,
+    title: displayName,
     color: agent.color,
-    model: model || "local-fallback",
+    model: publicModelName(model || "local-fallback"),
     status: "running",
     startedAt: now()
   });
@@ -2262,25 +2738,26 @@ async function runAgent(agent, context, system, plan, send) {
     } else {
       output = fallbackAgent(agent, context);
     }
+    output = sanitizeNexaVisibleText(output);
     send("agent", {
       id: agent.id,
-      name: agent.name,
-      title: agent.title,
+      name: displayName,
+      title: displayName,
       color: agent.color,
-      model: model || "local-fallback",
+      model: publicModelName(model || "local-fallback"),
       status: "complete",
-      output: clip(output, 2200),
+      output: sanitizeNexaVisibleText(clip(output, 2200)),
       completedAt: now()
     });
     return { agent, model, output };
   } catch (error) {
-    const output = fallbackAgent(agent, context);
+    const output = sanitizeNexaVisibleText(fallbackAgent(agent, context));
     send("agent", {
       id: agent.id,
-      name: agent.name,
-      title: agent.title,
+      name: displayName,
+      title: displayName,
       color: agent.color,
-      model: model || "local-fallback",
+      model: publicModelName(model || "local-fallback"),
       status: "fallback",
       output,
       error: error.message,
@@ -2300,7 +2777,7 @@ function fallbackAgent(agent, context) {
       summary: clip(request, 180)
     });
   }
-  return `${agent.title}: ${clip(request, 260)} をプロジェクト履歴、添付、ツール状況に沿って処理します。Ollamaモデルが利用できない場合でも、このローカルワークスペースに記録して続きから再開できます。`;
+  return `Nexa: ${clip(request, 260)} をプロジェクト履歴、添付、ツール状況に沿って処理します。Ollamaモデルが利用できない場合でも、このローカルワークスペースに記録して続きから再開できます。`;
 }
 
 function finalPrompt(context, outputs, mode = "agent") {
@@ -2325,7 +2802,7 @@ Context:
 ${context}
 
 Agent outputs:
-${outputs.map((item) => `## ${item.agent.name}\n${item.output}`).join("\n\n")}
+${outputs.map((item) => `## Nexa\n${sanitizeNexaVisibleText(item.output)}`).join("\n\n")}
 `.trim();
 }
 
@@ -2736,7 +3213,7 @@ function updateCodexConfig(project, patch = {}) {
     codex.goal = { text, status: text ? status : "idle", updatedAt: now() };
   }
   if (patch.permissions) {
-    const allowed = new Set(["read-only", "workspace-write", "auto", "full-access"]);
+    const allowed = new Set(["read-only", "workspace-write", "auto", "full-access", "danger-approval", "always-approval"]);
     if (allowed.has(patch.permissions)) codex.permissions = patch.permissions;
   }
   if (patch.memories) {
@@ -2768,6 +3245,8 @@ function permissionCapabilities(project = null) {
   const permissions = project ? normalizeCodexState(project).permissions : "workspace-write";
   const readOnly = permissions === "read-only";
   const fullAccess = permissions === "full-access";
+  const alwaysApproval = permissions === "always-approval" || permissions === "auto";
+  const dangerApproval = permissions === "danger-approval" || permissions === "workspace-write";
   return {
     permissions,
     canReadWorkspace: true,
@@ -2777,7 +3256,11 @@ function permissionCapabilities(project = null) {
     canRunChecks: !readOnly,
     canCreateAgentsFile: !readOnly,
     canControlComputer: fullAccess,
-    hardSafetyGuard: true
+    canUseInternet: !readOnly,
+    canReadAllFiles: fullAccess,
+    canWriteAllFiles: fullAccess,
+    approvalPolicy: fullAccess ? "never" : alwaysApproval ? "always" : dangerApproval ? "dangerous-only" : "always",
+    hardSafetyGuard: !fullAccess
   };
 }
 
@@ -2808,14 +3291,24 @@ function assertCodexPermission(project, action, detail = {}) {
   return capabilities;
 }
 
-function assertShellSafety(project, command, action = "shell") {
-  assertCodexPermission(project, action);
-  if (isDangerousShellCommand(command)) {
+function assertShellSafety(project, command, action = "shell", approved = false) {
+  const capabilities = assertCodexPermission(project, action);
+  if (capabilities.hardSafetyGuard && isDangerousShellCommand(command) && !approved) {
     const error = new Error("command_blocked_by_safety_guard");
     error.status = 400;
     error.code = "command_blocked_by_safety_guard";
     throw error;
   }
+}
+
+function assertOperationApproval(project, operation, { dangerous = false, approved = false } = {}) {
+  const capabilities = permissionCapabilities(project);
+  const needsApproval = capabilities.approvalPolicy === "always" ||
+    (capabilities.approvalPolicy === "dangerous-only" && dangerous);
+  if (needsApproval && !approved) {
+    throw permissionError("approval_required", `${operation} requires user approval in ${capabilities.approvalPolicy} mode`);
+  }
+  return capabilities;
 }
 
 async function workspaceTree(rel = "", depth = 2, limit = 260) {
@@ -2903,6 +3396,7 @@ async function writeWorkspaceFile(body) {
     throw error;
   }
   assertCodexPermission(project, "write");
+  assertOperationApproval(project, "file-write", { dangerous: false, approved: body.approved === true });
   assertWorkspaceReadyForWrite(project);
 
   const file = projectScopedWorkspacePath(project, rel);
@@ -2934,7 +3428,7 @@ async function writeWorkspaceFile(body) {
   const tmp = `${file}.${process.pid}.tmp`;
   await writeFile(tmp, content, "utf8");
   await rename(tmp, file);
-  return workspaceFile(relPath, project);
+  return workspaceFile(normalizeAccessLevel(project?.accessLevel) === "full" && isAbsoluteLocalPath(rel) ? rel : relPath, project);
 }
 
 function patchPath(value) {
@@ -3071,6 +3565,12 @@ async function workspacePatch(body) {
     throw error;
   }
   assertCodexPermission(project, "patch", { dryRun });
+  if (!dryRun) {
+    assertOperationApproval(project, "file-patch", {
+      dangerous: /\+\+\+\s+\/dev\/null|deleted file mode/i.test(patch),
+      approved: body.approved === true
+    });
+  }
   assertWorkspaceReadyForWrite(project, dryRun);
 
   const parsed = parseUnifiedPatch(patch);
@@ -3078,7 +3578,6 @@ async function workspacePatch(body) {
   const files = [];
 
   for (const filePatch of parsed) {
-    if (!filePatch.newPath) throw new Error("workspace_patch_delete_unsupported");
     const file = projectScopedWorkspacePath(project, filePatch.path);
     const relPath = projectRelativeWorkspacePath(project, file);
     if (!relPath) throw new Error("workspace_file_required");
@@ -3099,6 +3598,21 @@ async function workspacePatch(body) {
 
     if (!exists && filePatch.oldPath) throw new Error("workspace_patch_missing_file");
     if (exists && !filePatch.oldPath) throw new Error("workspace_patch_file_exists");
+
+    if (!filePatch.newPath) {
+      files.push({
+        path: relPath,
+        status: "deleted",
+        beforeHash: hashText(before),
+        afterHash: "",
+        beforeSize: Buffer.byteLength(before, "utf8"),
+        afterSize: 0,
+        changedLines: before.split("\n").length,
+        diff: compactDiff(before, "")
+      });
+      writes.push({ file, delete: true });
+      continue;
+    }
 
     const after = applyHunksToText(before, filePatch);
     const status = exists ? "modified" : "added";
@@ -3121,6 +3635,10 @@ async function workspacePatch(body) {
 
   if (!dryRun) {
     for (const write of writes) {
+      if (write.delete) {
+        await unlink(write.file);
+        continue;
+      }
       await mkdir(path.dirname(write.file), { recursive: true });
       const tmp = `${write.file}.${process.pid}.tmp`;
       await writeFile(tmp, write.content, "utf8");
@@ -3141,7 +3659,16 @@ async function workspacePatch(body) {
         stderr: "",
         timedOut: false,
         agents: [{ id: "patch", title: "Patch", status: "complete", output: files.map((item) => item.path).join(", ") }],
-        changes: files.map((item) => ({ path: item.path, status: item.status, changedLines: item.changedLines }))
+        changes: files.map((item) => ({
+          path: item.path,
+          status: item.status,
+          changedLines: item.changedLines,
+          beforeHash: item.beforeHash,
+          afterHash: item.afterHash,
+          beforeSize: item.beforeSize,
+          afterSize: item.afterSize,
+          diff: item.diff
+        }))
       });
       project.runs = project.runs.slice(-80);
       await saveProject(project);
@@ -3472,6 +3999,122 @@ async function workspaceFolderOverview(project, depth = 2, limit = 140) {
   };
 }
 
+function sourceFileKind(filePath = "") {
+  const name = path.basename(filePath).toLowerCase();
+  const ext = path.extname(filePath).toLowerCase();
+  if (name === "package.json") return "node package";
+  if (name === "pyproject.toml" || name === "requirements.txt") return "python package";
+  if (name.startsWith("vite.config")) return "vite config";
+  if (name.startsWith("next.config")) return "next config";
+  if (name === "tsconfig.json") return "typescript config";
+  if ([".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"].includes(ext)) return "source";
+  if ([".html", ".css"].includes(ext)) return "web";
+  if ([".json", ".yaml", ".yml", ".toml"].includes(ext)) return "config";
+  if ([".md", ".txt"].includes(ext)) return "docs";
+  if (ext === ".py") return "python";
+  return "text";
+}
+
+function sourceFileScore(relPath = "", userText = "") {
+  const normalized = relPath.replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  const request = String(userText || "").toLowerCase();
+  let score = 0;
+  if (/^(package\.json|readme\.md|agents\.md|tsconfig\.json|vite\.config\.[jt]s|next\.config\.(js|mjs|ts))$/.test(lower)) score += 10;
+  if (/^(server\.mjs|app\.js|index\.html|style\.css|styles\.css)$/.test(lower)) score += 9;
+  if (/^(src|app|pages|public|components|lib|electron)\//.test(lower)) score += 6;
+  if (/\.(js|mjs|cjs|jsx|ts|tsx|py|html|css|json)$/.test(lower)) score += 4;
+  for (const token of request.match(/[a-z0-9_-]{3,}/g) || []) {
+    if (lower.includes(token)) score += 4;
+  }
+  if (/test|spec|__tests__/.test(lower)) score += request.includes("test") || request.includes("bug") ? 3 : -2;
+  if (/dist|build|node_modules|coverage|\.min\./.test(lower)) score -= 20;
+  return score;
+}
+
+async function workspaceCodingContext(project, userText = "", depth = 3, limit = 160) {
+  if (!project?.workspaceReady) return null;
+  const rootPath = projectWorkspaceRootPath(project);
+  const files = [];
+  let remaining = limit;
+
+  async function walk(dir, level) {
+    if (remaining <= 0 || level > depth) return;
+    let entries = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => {
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const entry of entries) {
+      if (remaining <= 0) return;
+      const absolute = path.join(dir, entry.name);
+      const rel = projectRelativeWorkspacePath(project, absolute);
+      if (isWorkspaceIgnored(entry.name, rel)) continue;
+      if (entry.isDirectory()) {
+        await walk(absolute, level + 1);
+        continue;
+      }
+      remaining -= 1;
+      if (!isTextFile(absolute)) continue;
+      const fileStat = await stat(absolute).catch(() => null);
+      if (!fileStat?.isFile() || fileStat.size > 700 * 1024) continue;
+      const score = sourceFileScore(rel, userText);
+      if (score <= 0) continue;
+      files.push({
+        path: rel,
+        absolute,
+        size: fileStat.size,
+        score,
+        kind: sourceFileKind(rel)
+      });
+    }
+  }
+
+  await walk(rootPath, 0);
+  files.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+  const selected = files.slice(0, 12);
+  const packageJson = await readJson(path.join(rootPath, "package.json"), null);
+  const scripts = packageJson?.scripts ? Object.keys(packageJson.scripts).slice(0, 12) : [];
+  const deps = packageJson
+    ? Object.keys({ ...(packageJson.dependencies || {}), ...(packageJson.devDependencies || {}) }).slice(0, 24)
+    : [];
+  const lines = [
+    "Coding context map:",
+    `Root: ${project.workspaceRoot || project.selectedFolderPath || "."}`,
+    packageJson?.name ? `Package: ${packageJson.name}${packageJson.version ? `@${packageJson.version}` : ""}` : "",
+    scripts.length ? `Scripts: ${scripts.join(", ")}` : "",
+    deps.length ? `Dependencies: ${deps.join(", ")}` : "",
+    "",
+    "Most relevant files:",
+    ...(selected.length
+      ? selected.map((file) => `- ${file.path} (${file.kind}, ${file.size} bytes, score ${file.score})`)
+      : ["- No high-confidence source files detected yet."])
+  ].filter(Boolean);
+
+  for (const file of selected.slice(0, 7)) {
+    const content = await safeReadText(file.absolute, 9000);
+    if (!content.trim()) continue;
+    lines.push("", `File snapshot: ${file.path}`, clip(content, file.path.toLowerCase() === "package.json" ? 4200 : 6500));
+  }
+
+  const text = lines.join("\n");
+  return {
+    id: id("ctx"),
+    name: "coding-context-map",
+    path: ".",
+    type: "text/x-auto-workspace-context",
+    source: "auto",
+    size: Buffer.byteLength(text, "utf8"),
+    reason: "coding context map",
+    text
+  };
+}
+
 async function workspaceAutoContext(project, userText, manualAttachments = []) {
   const workspaceRoot = normalizeWorkspaceFolder(project);
   const manualPaths = new Set(
@@ -3515,7 +4158,10 @@ async function workspaceAutoContext(project, userText, manualAttachments = []) {
     .slice(0, 5);
 
   const overview = await workspaceFolderOverview(project);
-  const context = [...(overview ? [overview] : []), ...pinned];
+  const codingMap = needsWorkspaceCodingContext(userText) || routeCompanyWork(userText).needsCode
+    ? await workspaceCodingContext(project, userText)
+    : null;
+  const context = [...(overview ? [overview] : []), ...(codingMap ? [codingMap] : []), ...pinned];
   for (const candidate of picked) {
     try {
       const file = project?.workspaceReady ? projectScopedWorkspacePath(project, candidate.path) : workspacePath(candidate.path);
@@ -3655,7 +4301,7 @@ function updateCompanyMemory(project, userText, finalText, company = {}) {
   if (company?.intelligence) {
     facts.push(`AI intelligence level: Lv${company.intelligence.beforeLevel} -> Lv${company.intelligence.afterLevel}`);
     if (company.intelligence.qualityScore) {
-      decisions.push(`Vela quality gate: ${company.intelligence.qualityScore}/100 ${company.intelligence.revised ? "with revision" : "passed"}`);
+      decisions.push(`品質確認: ${company.intelligence.qualityScore}/100 ${company.intelligence.revised ? "保存前に補正" : "通過"}`);
     }
   }
   decisions.push(`Last request: ${clip(userText, 160)}`);
@@ -3671,8 +4317,8 @@ function processEvent(type, title, detail = "", data = {}) {
   return {
     id: id("step"),
     type,
-    title,
-    detail,
+    title: sanitizeNexaVisibleText(title),
+    detail: sanitizeNexaVisibleText(detail),
     data,
     createdAt: now()
   };
@@ -3697,6 +4343,455 @@ function fileChangeStats(files = []) {
   }, { count: 0, added: 0, modified: 0, changedLines: 0 });
 }
 
+function fileStatusJa(status = "") {
+  if (status === "added") return "新規作成";
+  if (status === "modified") return "編集";
+  if (status === "deleted") return "削除";
+  return "変更";
+}
+
+function filePurposeForLog(filePath = "", userText = "") {
+  const lower = String(filePath || "").toLowerCase();
+  const request = String(userText || "");
+  if (/index\.html?$/.test(lower)) {
+    if (isGameFallbackRequest(request)) return "ゲーム画面、HUD、操作説明、Canvasの土台を置くため";
+    if (isLandingPageRequest(request)) return "最初に開くページ構造と主要セクションを置くため";
+    return "アプリをブラウザで開いた時の画面構造を置くため";
+  }
+  if (/styles?\.css$/.test(lower)) {
+    if (isGameFallbackRequest(request)) return "ゲーム画面の見た目、余白、HUD、レスポンシブ表示を整えるため";
+    if (isLandingPageRequest(request)) return "LPの見た目、余白、色、アニメーションを整えるため";
+    return "アプリの見た目、余白、色、レスポンシブ表示を整えるため";
+  }
+  if (/(app|main|script|index)\.(js|mjs|cjs|ts|tsx|jsx)$/.test(lower)) {
+    if (isGameFallbackRequest(request)) return "プレイヤー操作、敵、当たり判定、スコア更新を動かすため";
+    return "ボタン操作、状態更新、画面の動きを実装するため";
+  }
+  if (/package\.json$/.test(lower)) return "起動コマンド、依存関係、アプリ情報を定義するため";
+  if (/readme|\.md$/.test(lower)) return "使い方やセットアップ手順を残すため";
+  if (/\.(json|ya?ml|toml)$/.test(lower)) return "設定やデータ構造を保存するため";
+  return "依頼に必要な処理をファイルとして保存するため";
+}
+
+function describeBuildTarget(userText = "", route = {}) {
+  const text = String(userText || "");
+  if (route?.intent?.semanticTarget === "current-workspace") {
+    if (route.intent.semanticAction === "debug") {
+      return "選択フォルダー内の現在の実装を読み、動かない根本原因を特定して修正し、実行確認まで行います。";
+    }
+    return "選択フォルダー内の現在のプロジェクトと直前の作業を引き継ぎ、最新の依頼を満たすまで実装・検証します。";
+  }
+  if (route?.safetyPlanOnly) return "ファイルは変更せず、削除の危険性と安全な再構築手順だけを整理します。";
+  if (route?.intent?.failureFollowUp || /動くように|動かして|起動できるように|正常に動作/i.test(text)) {
+    return "新規作成はせず、選択フォルダーの既存実装を読み、起動方法・実行時エラー・参照切れを診断して根本原因を修正します。";
+  }
+  if (is3DShooterRequest(text)) return "一人称視点で移動・照準・射撃・敵との戦闘ができる3Dシューティングゲームを、必要なファイル一式で作成します。";
+  if (isGameFallbackRequest(text)) return "操作できるゲームとして、依頼に必要な画面・スタイル・ゲームロジックを分けて作成します。";
+  if (isLandingPageRequest(text)) return "見た目の完成度を優先したLPとして、表示・スタイル・動きを分けて作成します。";
+  if (/dashboard|admin|管理|分析|グラフ|売上|統計/i.test(text)) return "一覧、指標、操作パネルを持つダッシュボード型アプリとして作成します。";
+  if (/todo|task|タスク|予定|チェックリスト/i.test(text)) return "追加、完了、削除、保存ができるタスク管理アプリとして作成します。";
+  if (/shop|store|ec|cart|商品|販売|カート/i.test(text)) return "商品一覧、選択、カートの土台を持つアプリとして作成します。";
+  if (/chat|sns|投稿|タイムライン|コミュニティ/i.test(text)) return "投稿、一覧、状態保存ができるコミュニケーション系アプリとして作成します。";
+  if (route?.needsCode) return "短い依頼から目的を補完し、開けるWebアプリの土台として作成します。";
+  return "会話内容を整理して、必要な出力を組み立てます。";
+}
+
+function safetyPlanDirectReply(project, userText = "", route = {}) {
+  if (!route?.safetyPlanOnly && !isNonExecutingSafetyRequest(userText)) return "";
+  const folder = project?.workspaceReady
+    ? project.workspaceRoot || project.selectedFolderPath || "選択フォルダー"
+    : "未選択の作業フォルダー";
+  return [
+    "今回は実行せず、ファイルの削除や変更も行いません。",
+    "",
+    "**主な危険性**",
+    "- 全削除すると、既存コードだけでなく設定、素材、環境変数のひな形、ドキュメントも失う可能性があります。",
+    "- `.git`、`.env`、保存データ、ライセンス、外部サービス設定まで消すと復旧できない場合があります。",
+    "- 一度に作り直すと、どの変更で動かなくなったか追跡しにくくなります。",
+    "",
+    "**安全な代替案**",
+    `1. 対象を \`${folder}\` の内部だけに固定します。`,
+    "2. 削除前にファイル一覧と削除対象を表示し、`.git`、`.env`、ユーザーデータを除外します。",
+    "3. 現在の状態をバックアップまたはスナップショットとして保存します。",
+    "4. 既存ファイルを即時削除せず、退避フォルダーへ移してから新しい構成を作ります。",
+    "5. 最小構成で起動確認し、3D描画、操作、射撃、敵AI、効果音の順に追加します。",
+    "6. 動作確認後に限り、退避した不要ファイルの削除を改めて承認します。",
+    "",
+    "**3Dシューティングゲームの安全な再構築案**",
+    "- Three.jsなど実績のある3Dエンジンを使い、まず移動・カメラ・当たり判定を実装します。",
+    "- 次に武器、敵AI、HUD、ステージ、音響を分離して追加します。",
+    "- 各段階で起動テストを行い、失敗時は直前のスナップショットへ戻せるようにします。",
+    "",
+    "現時点では、対象フォルダーへの書き込み・編集・削除・コマンド実行は0件です。"
+  ].join("\n");
+}
+
+function executableRequestFromSafetyPrompt(userText = "") {
+  return String(userText || "")
+    .replace(/\s*(?:まだ)?実行せず[、,]?\s*(?:危険性と安全な代替案だけ説明して|安全な計画と確認ポイントだけ出して)[。.]?/gi, "")
+    .replace(/\s*(?:削除せず|変更せず)[、,]?\s*(?:説明|計画)だけ(?:して|出して)[。.]?/gi, "")
+    .replace(/(?:\s*直前に提示した安全な代替案に沿って進め[、,]?\s*破壊的変更の前に最終確認を取って[。.]?)+/gi, "")
+    .trim();
+}
+
+function latestPendingSafetyPlan(project) {
+  const lastMessage = [...(project?.messages || [])].reverse().find((message) =>
+    message.role === "assistant" || message.role === "user"
+  );
+  return lastMessage?.role === "assistant" && lastMessage.safetyPlan?.executableRequest
+    ? lastMessage.safetyPlan
+    : null;
+}
+
+function isExplicitSafetyApproval(submittedText = "") {
+  const text = String(submittedText || "")
+    .toLowerCase()
+    .replace(/[\s、,。.!！?？]/g, "");
+  const explicitApproval = /^(?:ok|okay|了承|承認|はい|うん)?(?:それ(?:を)?|この内容(?:で)?|その内容(?:で)?)?(?:やって|実行して|進めて|開始して|作って|お願い|よろしく)$/.test(text);
+  const shortApproval = /^(?:ok|okay|了承|承認|はい|うん)$/.test(text);
+  return explicitApproval || shortApproval;
+}
+
+function pendingSafetyPlanContinuation(project, submittedText = "") {
+  return isExplicitSafetyApproval(submittedText) ? latestPendingSafetyPlan(project) : null;
+}
+
+async function resolveSafetyActionDecision(plan, submittedText, system = {}) {
+  if (!plan) return { decision: "none", confidence: 1, source: "none", reason: "保留中の安全計画はありません。" };
+  const deterministicApproval = isExplicitSafetyApproval(submittedText);
+  const model = system.plan?.fast || system.plan?.conversation || "";
+  if (!model) {
+    return {
+      decision: deterministicApproval ? "approve" : "unclear",
+      confidence: deterministicApproval ? 0.98 : 0.4,
+      source: "safety-rules",
+      reason: deterministicApproval ? "明示的な承認表現を検出しました。" : "判断モデルが利用できないため安全側に停止します。"
+    };
+  }
+  try {
+    const answer = await llmChat(model, [
+      {
+        role: "system",
+        content: "You are Nexa Safety Decision AI. Classify the user's reply to a pending destructive-operation plan. Return JSON only: {\"decision\":\"approve|cancel|explain|unclear\",\"confidence\":0.0,\"reason\":\"short Japanese reason\"}. Never invent approval."
+      },
+      {
+        role: "user",
+        content: `Pending plan:\n${clip(plan.executableRequest, 1200)}\n\nUser reply:\n${clip(submittedText, 300)}`
+      }
+    ], {
+      temperature: 0,
+      numPredict: 140,
+      timeout: 8000,
+      fallbackModel: localFallbackForKind(system, "conversation")
+    });
+    const jsonText = String(answer || "").match(/\{[\s\S]*\}/)?.[0] || "";
+    const parsed = JSON.parse(jsonText);
+    const allowed = new Set(["approve", "cancel", "explain", "unclear"]);
+    const decision = allowed.has(parsed.decision) ? parsed.decision : "unclear";
+    const confidence = Math.max(0, Math.min(1, Number(parsed.confidence) || 0));
+    // A destructive action needs either a clear AI decision or an explicit
+    // deterministic approval. Low-confidence model output cannot authorize it.
+    const approved = decision === "approve" && (confidence >= 0.82 || deterministicApproval);
+    return {
+      decision: approved ? "approve" : decision === "approve" ? "unclear" : decision,
+      confidence,
+      source: "safety-decision-ai",
+      model: publicModelName(model),
+      reason: clip(parsed.reason || "安全判断AIが返答を分類しました。", 240)
+    };
+  } catch (error) {
+    return {
+      decision: deterministicApproval ? "approve" : "unclear",
+      confidence: deterministicApproval ? 0.98 : 0.3,
+      source: "safety-rules-fallback",
+      reason: deterministicApproval ? "判断AIが利用できないため、明示的な承認ルールで確認しました。" : `判断AIを利用できません: ${error.message}`
+    };
+  }
+}
+
+async function resolveTurnIntentWithAi(project, submittedText, system = {}) {
+  const mode = normalizeChatMode(project?.mode);
+  if (mode === "chat") return null;
+  // Intent routing needs reliable structured output more than long-form prose.
+  // Prefer the fast non-thinking model so reasoning text cannot corrupt JSON.
+  const model = system.plan?.fast || system.plan?.conversation || system.plan?.code || "";
+  if (!model) return null;
+  const recent = (project?.messages || []).slice(-10).map((message) => ({
+    role: message.role,
+    content: clip(sanitizeUserVisibleAssistantText(message.content || ""), 900)
+  }));
+  let workspace = "folder not selected";
+  if (project?.workspaceReady) {
+    try {
+      const summary = await workspaceDevelopmentLogSummary(project);
+      workspace = `${project.workspaceRoot || project.selectedFolderPath}\n${summary.detail}`;
+    } catch {
+      workspace = project.workspaceRoot || project.selectedFolderPath || "selected folder";
+    }
+  }
+  try {
+    const answer = await llmChat(model, [
+      {
+        role: "system",
+        content: [
+          "You are Nexa Intent Decision AI. Understand meaning from the whole local conversation and workspace state, not keyword matching. Do not think aloud.",
+          "Return JSON only with this schema:",
+          '{"action":"chat|explain|create|modify|debug|continue|research|image|computer|command","continuation":true,"target":"current-workspace|new-artifact|conversation","needsCode":true,"needsResearch":false,"needsInternet":false,"needsComputer":false,"destructive":false,"confidence":0.0,"resolvedRequest":"clear Japanese instruction for the main AI","reason":"short Japanese reason"}.',
+          "For short follow-ups such as make it work, improve it, that one, continue, infer the concrete target from the immediately preceding implementation and current workspace.",
+          "Never turn an existing-app repair into a generic new web app. Never infer destructive permission merely from an app feature named delete.",
+          "resolvedRequest must preserve the user's latest intent and tell the main AI what outcome to achieve, not how to fake success."
+        ].join(" ")
+      },
+      {
+        role: "user",
+        content: [
+          `Mode: ${mode || "unselected"}`,
+          `Workspace:\n${clip(workspace, 1800)}`,
+          `Previous implementation goal: ${clip(latestImplementationRequest(project), 700) || "unknown"}`,
+          `Recent conversation:\n${recent.map((item) => `${item.role}: ${item.content}`).join("\n") || "none"}`,
+          `Latest user message:\n${submittedText}`
+        ].join("\n\n")
+      }
+    ], {
+      temperature: 0,
+      numPredict: 320,
+      timeout: 30000,
+      fallbackModel: localFallbackForKind(system, "conversation")
+    });
+    const raw = String(answer || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+    const candidates = [fenced, raw, raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)].filter(Boolean);
+    let parsed = null;
+    for (const candidate of candidates) {
+      try {
+        parsed = JSON.parse(candidate);
+        break;
+      } catch {
+        // Try the next representation before falling back to legacy routing.
+      }
+    }
+    if (!parsed) return null;
+    const actions = new Set(["chat", "explain", "create", "modify", "debug", "continue", "research", "image", "computer", "command"]);
+    const targets = new Set(["current-workspace", "new-artifact", "conversation"]);
+    if (!actions.has(parsed.action) || !targets.has(parsed.target)) return null;
+    return {
+      action: parsed.action,
+      continuation: Boolean(parsed.continuation),
+      target: parsed.target,
+      needsCode: Boolean(parsed.needsCode),
+      needsResearch: Boolean(parsed.needsResearch),
+      needsInternet: Boolean(parsed.needsInternet),
+      needsComputer: Boolean(parsed.needsComputer),
+      destructive: Boolean(parsed.destructive),
+      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
+      resolvedRequest: clip(String(parsed.resolvedRequest || "").trim(), 1600),
+      reason: clip(String(parsed.reason || "").trim(), 320),
+      model: publicModelName(model),
+      source: "semantic-intent-ai"
+    };
+  } catch {
+    return null;
+  }
+}
+
+function semanticExecutionRequest(decision, submittedText) {
+  if (!decision?.resolvedRequest) return submittedText;
+  const action = {
+    create: "新しく実装する",
+    modify: "既存実装を編集して改善する",
+    debug: "既存実装を調査し、原因を特定して修正・検証する",
+    continue: "直前までの実装を引き継ぎ、完成条件まで作業する",
+    research: "必要な情報を調査して根拠をまとめる",
+    image: "画像生成として処理する",
+    computer: "必要なコンピューター操作を実行する",
+    command: "必要なコマンドを実行して検証する",
+    explain: "会話として分かりやすく説明する",
+    chat: "会話として直接回答する"
+  }[decision.action] || "依頼を処理する";
+  const target = decision.target === "current-workspace"
+    ? "対象は選択フォルダー内の現在のプロジェクト。新しい汎用アプリへ置き換えず、既存構成と直前の作業を継承する。"
+    : decision.target === "new-artifact"
+      ? "対象は今回新しく作る成果物。"
+      : "対象は現在の会話。";
+  return `${target}\n処理方針: ${action}。\nユーザーの最新依頼: ${submittedText}\n意味判断AIの具体化: ${decision.resolvedRequest}`;
+}
+
+function isProtectedRebuildEntry(name = "") {
+  const lower = String(name || "").toLowerCase();
+  return lower === ".git" || lower === ".env" || lower.startsWith(".nexa-backup-") ||
+    ["data", "uploads", "saves", "save", "storage"].includes(lower) ||
+    /\.(?:db|sqlite|sqlite3)$/.test(lower);
+}
+
+async function stageConfirmedWorkspaceRebuild(project) {
+  assertWorkspaceReadyForWrite(project);
+  const root = projectWorkspaceRootPath(project);
+  const entries = await readdir(root, { withFileTypes: true });
+  const movable = entries.filter((entry) => !isProtectedRebuildEntry(entry.name));
+  if (!movable.length) return { backupPath: "", moved: [], protected: entries.map((entry) => entry.name) };
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupName = `.nexa-backup-${stamp}`;
+  const backupPath = path.join(root, backupName);
+  await mkdir(backupPath, { recursive: false });
+  const moved = [];
+  try {
+    for (const entry of movable) {
+      await rename(path.join(root, entry.name), path.join(backupPath, entry.name));
+      moved.push(entry.name);
+    }
+  } catch (error) {
+    for (const name of [...moved].reverse()) {
+      try {
+        await rename(path.join(backupPath, name), path.join(root, name));
+      } catch {
+        // Leave the recoverable backup in place if an individual rollback fails.
+      }
+    }
+    throw error;
+  }
+  return {
+    backupPath: backupName,
+    moved,
+    protected: entries.filter((entry) => isProtectedRebuildEntry(entry.name)).map((entry) => entry.name)
+  };
+}
+
+async function restoreStagedWorkspace(project, staged = {}) {
+  if (!staged?.backupPath || !Array.isArray(staged.moved) || !staged.moved.length) return [];
+  const root = projectWorkspaceRootPath(project);
+  const backup = path.join(root, staged.backupPath);
+  const restored = [];
+  for (const name of staged.moved) {
+    const source = path.join(backup, name);
+    const target = path.join(root, name);
+    try {
+      await stat(source);
+      try {
+        await stat(target);
+        continue;
+      } catch (error) {
+        if (error.code !== "ENOENT") continue;
+      }
+      await rename(source, target);
+      restored.push(name);
+    } catch {
+      // Keep remaining entries in the backup for manual recovery.
+    }
+  }
+  return restored;
+}
+
+function expectedFilesForLog(userText = "", route = {}) {
+  if (route?.intent?.failureFollowUp || /動くように|動かして|起動できるように|正常に動作/i.test(String(userText || ""))) return [];
+  if (is3DShooterRequest(userText)) return ["index.html", "style.css", "app.js", "README.md"];
+  if (isGameFallbackRequest(userText)) return ["index.html", "style.css", "app.js"];
+  const requested = inferRequestedFiles(userText);
+  if (requested.length) return requested;
+  if (isLandingPageRequest(userText)) return ["index.html", "style.css", "app.js"];
+  if (route?.needsCode) return ["必要なファイル"];
+  return [];
+}
+
+function expectedFilesTextForLog(userText = "", route = {}) {
+  const files = expectedFilesForLog(userText, route);
+  return files.length ? files.join(", ") : "ファイル作成なし";
+}
+
+async function workspaceDevelopmentLogSummary(project = null) {
+  if (!project?.workspaceReady) {
+    return {
+      title: "作業フォルダーを確認",
+      detail: "まだ作業フォルダーが選択されていません。直接コードを書くにはフォルダー選択が必要です。",
+      empty: true,
+      fileCount: 0,
+      dirCount: 0,
+      sample: []
+    };
+  }
+  const rootPath = projectWorkspaceRootPath(project);
+  let entries = [];
+  try {
+    entries = await readdir(rootPath, { withFileTypes: true });
+  } catch (error) {
+    return {
+      title: "既存ファイルを確認",
+      detail: `フォルダーを読み取れませんでした: ${error.message}`,
+      empty: true,
+      fileCount: 0,
+      dirCount: 0,
+      sample: []
+    };
+  }
+  const visible = entries
+    .map((entry) => {
+      const rel = projectRelativeWorkspacePath(project, path.join(rootPath, entry.name));
+      return { entry, rel };
+    })
+    .filter(({ entry, rel }) => !isWorkspaceIgnored(entry.name, rel))
+    .sort((a, b) => {
+      if (a.entry.isDirectory() !== b.entry.isDirectory()) return a.entry.isDirectory() ? -1 : 1;
+      return a.entry.name.localeCompare(b.entry.name);
+    });
+  const files = visible.filter(({ entry }) => entry.isFile());
+  const dirs = visible.filter(({ entry }) => entry.isDirectory());
+  const sample = visible.slice(0, 8).map(({ entry }) => `${entry.name}${entry.isDirectory() ? "/" : ""}`);
+  const folderName = project.selectedFolderName || folderNameFromWorkspace(project.workspaceRoot || "") || project.name || "workspace";
+  return {
+    title: "既存ファイルを確認",
+    detail: visible.length
+      ? `${folderName} にはファイル${files.length}件、フォルダー${dirs.length}件があります。${sample.length ? `確認した項目: ${sample.join(", ")}` : ""}`
+      : `${folderName} は空でした。これから必要なファイルを新しく作成します。`,
+    empty: visible.length === 0,
+    fileCount: files.length,
+    dirCount: dirs.length,
+    sample
+  };
+}
+
+function codeProcessFileEvents(result = {}, userText = "") {
+  const files = result?.files || [];
+  const stats = fileChangeStats(files);
+  const events = [];
+  for (const file of files.filter((item) => item.status !== "deleted").slice(0, 24)) {
+    const action = fileStatusJa(file.status);
+    const purpose = filePurposeForLog(file.path, userText);
+    events.push(processEvent(
+      "edit",
+      `${file.path} を${action}しました`,
+      `${purpose}。${Number(file.changedLines || 0) ? `変更行: ${file.changedLines}` : ""}`.trim(),
+      {
+        file,
+        files: [file],
+        stats: {
+          count: 1,
+          added: file.status === "added" ? 1 : 0,
+          modified: file.status === "modified" ? 1 : 0,
+          changedLines: Number(file.changedLines || 0)
+        }
+      }
+    ));
+  }
+  if (files.length > 12) {
+    events.push(processEvent("edit", "さらに複数ファイルを反映しました", `${files.length - 12}件を追加で処理しました。`, { files: files.slice(12), stats }));
+  }
+  events.push(processEvent("edit", "変更したファイルをまとめました", files.map((file) => `${file.status}: ${file.path}`).join("\n"), {
+    files,
+    stats
+  }));
+  return events;
+}
+
+function codeProcessFinishEvent(result = {}, verification = "", checkSummary = "") {
+  const stats = fileChangeStats(result?.files || []);
+  return processEvent(
+    "done",
+    "最後の確認が完了しました",
+    [verification, checkSummary, stats.changedLines ? `変更行: ${stats.changedLines}` : ""].filter(Boolean).join("\n\n"),
+    { stats }
+  );
+}
+
 function codeProcessSuccessEvents(project, method, result, verification = "", repaired = false, fallback = false) {
   const files = result?.files || [];
   const stats = fileChangeStats(files);
@@ -3705,7 +4800,7 @@ function codeProcessSuccessEvents(project, method, result, verification = "", re
     processEvent("thinking", "作業フォルダーを確認", folder, {
       folderPath: project?.workspaceRoot || project?.selectedFolderPath || ""
     }),
-    processEvent("thinking", repaired ? "Forge出力を補修" : "Forgeがコード変更案を生成", fallback ? "モデル出力が壊れても、要求からテンプレート補完しました。" : ""),
+    processEvent("thinking", repaired ? "Nexa出力を補修" : "Nexaがコード変更案を生成", fallback ? "モデル出力が壊れても、要求からテンプレート補完しました。" : ""),
     processEvent("edit", `${stats.count}件のファイルを編集`, files.map((file) => `${file.status}: ${file.path}`).join("\n"), {
       files,
       stats
@@ -3723,8 +4818,8 @@ function codeProcessFailureEvents(project, error = "") {
     processEvent("thinking", "作業フォルダーを確認", folder, {
       folderPath: project?.workspaceRoot || project?.selectedFolderPath || ""
     }),
-    processEvent("thinking", "Forgeがコード変更案を生成"),
-    processEvent("error", "直接書き込みに失敗", error || "writable_file_block_or_valid_diff_not_found")
+    processEvent("thinking", "Nexaがコード変更案を生成"),
+    processEvent("error", "直接書き込みに失敗", userVisibleWriteIssue(error || "writable_file_block_or_valid_diff_not_found"))
   ];
 }
 
@@ -3840,6 +4935,11 @@ function ambiguityChoiceRequest(project, userText = "", route = {}, attachments 
   if (route.needsCode && project?.workspaceReady) return null;
   if (attachments.length || autoContext.length || intent.continuationHint) return null;
 
+  // A short conversational turn is still a complete request.  Do not turn
+  // greetings, thanks, or simple social replies into a blocking choice gate.
+  const conversationalTurn = /^(?:こんにちは|こんばんは|おはよう(?:ございます)?|やあ|もしもし|はじめまして|よろしく(?:お願いします)?|ありがとう(?:ございます)?|どうも|元気(?:ですか)?|[Hh]ello|[Hh]i|[Tt]hanks?)\s*[!！。.、]*$/u.test(text);
+  if (conversationalTurn) return null;
+
   const compact = text.replace(/\s+/g, "");
   const vagueReference = /^(これ|それ|あれ|この感じ|こんな感じ|いい感じに|お願い|やって|進めて|直して|改善して|作って|どうする|なにする|続き|もっと)$/i.test(compact);
   const weakInstruction = intent.isTerse && !/(コード|作成|実装|修正|画像|動画|検索|説明|教えて|ChatGPT|賢く|フォルダー|ファイル|LP|UI|API|html|css|js|code|fix|make|build)/i.test(text);
@@ -3887,11 +4987,19 @@ function ambiguityChoiceRequest(project, userText = "", route = {}, attachments 
   };
 }
 
+function isDestructiveOperationRequest(userText = "") {
+  const text = String(userText || "");
+  const fileDestruction = /(?:ファイル|フォルダー|ディレクトリ|作業フォルダー|中身|内容|プロジェクト).{0,18}(?:すべて|全部|一度|一回)?(?:を)?(?:削除|消して|初期化)|(?:すべて|全部|全).{0,8}(?:ファイル|フォルダー|中身|内容).{0,8}(?:削除|消して)|(?:削除|消して).{0,12}(?:作り直|一から)/i.test(text);
+  const shellDestruction = /\b(?:rm\s+-[a-z]*r|rmdir|del\s+\/s|format\s+[a-z]:|remove-item\b[^\n]*-recurse|git\s+clean\s+-|git\s+reset\s+--hard)\b/i.test(text);
+  const secrets = /api key|token|secret|password|環境変数|APIキー|トークン|パスワード/i.test(text);
+  return fileDestruction || shellDestruction || secrets;
+}
+
 function dangerousActionChoiceRequest(project, userText = "", route = {}) {
   const text = String(userText || "");
-  const intent = route.intent || analyzeUserIntent(text, project);
-  if (!intent.needsCare) return null;
-  if (!/(削除|消して|初期化|format|rm\s|del\s|remove|delete|api key|token|secret|password|環境変数)/i.test(text)) return null;
+  if (normalizeAccessLevel(project?.accessLevel) === "full") return null;
+  if (!isDestructiveOperationRequest(text)) return null;
+  if (/(実行せず|実行しない|削除せず|変更せず|説明だけ|計画だけ|リスクだけ)/i.test(text)) return null;
   return {
     id: id("choice"),
     title: "安全確認が必要です",
@@ -3905,11 +5013,11 @@ function dangerousActionChoiceRequest(project, userText = "", route = {}) {
         prompt: `${text}\nまだ実行せず、安全な計画と確認ポイントだけ出して。`
       },
       {
-        id: "workspace-only",
-        label: "フォルダー内だけ",
-        description: "選択フォルダーの範囲に限定して作業します。",
+        id: "workspace-delete-confirm",
+        label: "選択フォルダー内の削除を承認",
+        description: "対象を選択フォルダー内に限定し、削除対象を確認してから再作成します。",
         action: project?.workspaceReady ? "send-prompt" : "folder-picker",
-        prompt: `${text}\n選択フォルダー内だけを対象にし、破壊的変更の前に確認して。`
+        prompt: `${text}\nこの選択で、選択フォルダー内に限定した削除を明示的に承認しました。削除対象を記録してから再作成して。`
       },
       {
         id: "explain-risk",
@@ -3922,8 +5030,52 @@ function dangerousActionChoiceRequest(project, userText = "", route = {}) {
   };
 }
 
-function preflightChoiceRequest(project, userText = "", route = {}, attachments = [], autoContext = []) {
+function alwaysApprovalChoiceRequest(project, userText = "", route = {}) {
+  if (normalizeAccessLevel(project?.accessLevel) !== "default") return null;
+  const text = String(userText || "");
+  const externalOperation = route.needsCode || route.needsResearch ||
+    /(internet|web|https?:\/\/|download|upload|powershell|terminal|command|windows|アプリを開|コマンド|インターネット|ウェブ|検索|ダウンロード|アップロード|ファイル.*(?:編集|変更|作成|削除))/i.test(text);
+  if (!externalOperation) return null;
+  return {
+    id: id("choice"),
+    title: "実行前の承認",
+    body: "承認を常に求めるモードです。外部ファイル、ネットワーク、コマンド、Windows操作を開始する前に確認します。",
+    options: [
+      {
+        id: "approve-once",
+        label: "今回だけ承認",
+        description: "この依頼に必要な外部操作だけを許可します。",
+        action: "send-prompt",
+        prompt: `${text}\nこの依頼に必要な外部操作を今回だけ承認します。`
+      },
+      {
+        id: "safe-plan",
+        label: "計画だけ確認",
+        description: "まだ実行せず、予定する操作と対象だけ表示します。",
+        action: "send-prompt",
+        prompt: `${text}\nまだ実行せず、操作対象、コマンド、ネットワーク利用の計画だけ示して。`
+      }
+    ]
+  };
+}
+
+function isNonExecutingSafetyRequest(userText = "") {
+  const text = String(userText || "");
+  const dangerous = isDestructiveOperationRequest(text);
+  const noExecution = /(実行せず|実行しない|削除せず|変更せず|説明だけ|計画だけ|リスクだけ)/i.test(text);
+  return dangerous && noExecution;
+}
+
+function preflightChoiceRequest(project, userText = "", route = {}, attachments = [], autoContext = [], choiceResolution = null) {
+  // Chat mode is intentionally conversation-only. It must not turn a casual
+  // message into a code/folder workflow or block the reply behind a chooser.
+  if (route.modeForcedChat) return null;
+  // A selection from this gate is an explicit answer, not a fresh dangerous
+  // request. Re-running the same gate would trap the user in an infinite loop.
+  if (choiceResolution?.requestId && choiceResolution?.optionId) return null;
+  if (normalizeAccessLevel(project?.accessLevel) === "full") return null;
   return dangerousActionChoiceRequest(project, userText, route) ||
+    alwaysApprovalChoiceRequest(project, userText, route) ||
     ambiguityChoiceRequest(project, userText, route, attachments, autoContext);
 }
 
@@ -3931,6 +5083,16 @@ function choiceRequestIntro(choiceRequest = {}) {
   return choiceRequest.title === "安全確認が必要です"
     ? "この操作は安全確認を挟みます。下の選択肢から進め方を選んでください。"
     : "短い依頼として受け取りました。下の選択肢から進め方を選べます。";
+}
+
+function resolveLatestChoiceRequest(project) {
+  const message = [...(project?.messages || [])]
+    .reverse()
+    .find((item) => item.role === "assistant" && item.choiceRequest);
+  if (!message) return false;
+  delete message.choiceRequest;
+  message.choiceResolvedAt = now();
+  return true;
 }
 
 function videoDisabledChoiceRequest(userText = "") {
@@ -4870,7 +6032,7 @@ async function openAiJson(pathname, options = {}) {
     data = { raw: text };
   }
   if (!response.ok) {
-    const error = new Error(data?.error?.message || data?.message || text || `OpenAI API error ${response.status}`);
+    const error = new Error(data?.error?.message || data?.message || text || `Cloud video API error ${response.status}`);
     error.status = response.status;
     error.data = data;
     throw error;
@@ -4915,7 +6077,7 @@ function augmentSoraPrompt(prompt = "", options = {}) {
     "Action: one clear subject action that matches the request, with natural timing and believable motion",
     "Camera: cinematic tracking shot, gentle camera move, stable composition, 35mm lens feel",
     "Lighting/mood: realistic cinematic lighting, soft depth of field, polished high-fidelity look",
-    "Style/format: Sora-style realistic video, no slideshow, no text card, no UI overlay",
+    "Style/format: realistic cinematic video, no slideshow, no text card, no UI overlay",
     "Timing/beats: establish the scene, perform the main action, end on a readable final pose",
     "Constraints: keep content suitable for all audiences, use only original generic subjects, no copyrighted characters, no public figures",
     "Avoid: visible prompt text, subtitles, logos, watermark, jittery limbs, morphing, flicker, unreadable anatomy"
@@ -4947,7 +6109,7 @@ async function downloadSoraVideoContent(videoId, targetFile) {
     throw error;
   }
   const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length) throw new Error("Sora video download returned empty content");
+  if (!buffer.length) throw new Error("Nexa video download returned empty content");
   await writeFile(targetFile, buffer);
   return buffer.length;
 }
@@ -4957,8 +6119,8 @@ function soraPendingHtml(prompt, artifactId, job = {}, options = {}) {
   const status = escapeXml(job?.status || "processing");
   const videoId = escapeXml(job?.id || artifactId);
   const seconds = escapeXml(options.seconds || "");
-  return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sora processing</title><style>
-html,body{height:100%;margin:0;background:#080910;color:#f5f7ff;font-family:Inter,Arial,sans-serif}body{display:grid;place-items:center}.card{width:min(760px,88vw);padding:42px;border:1px solid rgba(255,255,255,.16);border-radius:32px;background:linear-gradient(135deg,rgba(255,255,255,.12),rgba(255,255,255,.05));box-shadow:0 40px 120px rgba(0,0,0,.42)}.orb{width:70px;height:70px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#fff,#7a8cff 45%,#4b2fff);box-shadow:0 0 60px rgba(105,122,255,.8);animation:pulse 1.4s ease-in-out infinite}.row{display:flex;gap:22px;align-items:center}h1{font-size:26px;margin:0 0 10px}p{color:#b9bfd2;line-height:1.7}.meta{margin-top:24px;padding-top:20px;border-top:1px solid rgba(255,255,255,.12);display:grid;gap:8px;color:#dce3ff;font-size:13px}@keyframes pulse{0%,100%{transform:scale(.92);opacity:.72}50%{transform:scale(1.08);opacity:1}}</style></head><body><main class="card"><div class="row"><div class="orb"></div><div><h1>Soraで生成中です</h1><p>動画ジョブを開始しました。完了後にMP4を保存して、このチャット内で再生できます。</p></div></div><div class="meta"><span>status: ${status}</span><span>video id: ${videoId}</span><span>seconds: ${seconds}</span><span>prompt: ${escapedPrompt}</span></div></main></body></html>`;
+  return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nexa processing</title><style>
+html,body{height:100%;margin:0;background:#080910;color:#f5f7ff;font-family:Inter,Arial,sans-serif}body{display:grid;place-items:center}.card{width:min(760px,88vw);padding:42px;border:1px solid rgba(255,255,255,.16);border-radius:32px;background:linear-gradient(135deg,rgba(255,255,255,.12),rgba(255,255,255,.05));box-shadow:0 40px 120px rgba(0,0,0,.42)}.orb{width:70px;height:70px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#fff,#7a8cff 45%,#4b2fff);box-shadow:0 0 60px rgba(105,122,255,.8);animation:pulse 1.4s ease-in-out infinite}.row{display:flex;gap:22px;align-items:center}h1{font-size:26px;margin:0 0 10px}p{color:#b9bfd2;line-height:1.7}.meta{margin-top:24px;padding-top:20px;border-top:1px solid rgba(255,255,255,.12);display:grid;gap:8px;color:#dce3ff;font-size:13px}@keyframes pulse{0%,100%{transform:scale(.92);opacity:.72}50%{transform:scale(1.08);opacity:1}}</style></head><body><main class="card"><div class="row"><div class="orb"></div><div><h1>Nexaで生成中です</h1><p>動画ジョブを開始しました。完了後にMP4を保存して、このチャット内で再生できます。</p></div></div><div class="meta"><span>status: ${status}</span><span>video id: ${videoId}</span><span>seconds: ${seconds}</span><span>prompt: ${escapedPrompt}</span></div></main></body></html>`;
 }
 
 async function createSoraVideoArtifact(project, prompt, attachments = [], options = {}) {
@@ -5183,7 +6345,7 @@ function highQualityVideoEngineStatus() {
         : ltxReady && !ltxModels.ready
         ? "LTX model missing"
         : "LTX installed, API workflow needed"
-      : "Kino fallback";
+      : "Nexa fallback";
   const missing = [];
   if (ltxReady && !ltxModels.checkpointReady && !ltxDiffusers.modelCached) missing.push("LTX model weights");
   if (ltxReady && ltxModels.checkpointReady && !ltxModels.gemmaReady) missing.push("LTX text encoder");
@@ -5771,61 +6933,42 @@ async function createGeneratedArtifact(project, kind, prompt, attachments = [], 
 }
 
 function mediaGenerationAgents(kind, artifact = null) {
-  const generatorName = kind === "video" ? "Kino" : "Lumen";
   const provider = artifact?.provider || (kind === "video" ? "local-cinematic-video" : "local-cinematic-image");
   const isSora = kind === "video" && /^openai-sora/i.test(provider);
   const isLtx = kind === "video" && /^ltx-diffusers/i.test(provider);
   const isComfy = kind === "video" && /^comfyui/i.test(provider);
   const isBuiltInVideo = kind === "video" && /^kino-builtin-video/i.test(provider);
   return [
-    { id: "orchestrator", name: "Astra", model: "local", output: isSora ? "Routed the prompt to the Sora video provider." : isLtx ? "Routed the prompt to the local LTX-Video Diffusers engine." : isComfy ? "Routed the prompt to the free local ComfyUI video provider." : isBuiltInVideo ? "Selected the bundled zero-setup Kino video renderer." : "Analyzed the prompt and selected a visual scene renderer.", error: "" },
-    { id: "generator", name: isLtx ? "LTX" : generatorName, model: provider, output: isSora ? "Created a Sora video job, polled for completion, and saved the MP4 for in-app preview." : isLtx ? "Generated an MP4 with the local LTX-Video model and saved it for in-app preview." : isComfy ? "Queued a ComfyUI video workflow, polled generation history, and saved the generated media for in-app preview." : isBuiltInVideo ? "Rendered prompt-aware PNG frames and encoded them into an in-app WebM video." : kind === "video" ? "Generated a browser-ready animated scene with camera motion and prompt-aware layers." : "Generated a prompt-aware visual scene without turning the prompt into the main content.", error: "" },
-    { id: "verifier", name: "Proof", model: "local", output: "Checked the artifact path, preview type, dimensions, and metadata.", error: "" }
+    { id: "orchestrator", name: "Nexa", model: "Nexa", output: isSora || isLtx || isComfy || isBuiltInVideo ? "生成方式を選択し、チャット内プレビュー用の成果物を準備しました。" : "プロンプトを解析し、視覚シーンの生成方針を選びました。", error: "" },
+    { id: "generator", name: "Nexa", model: "Nexa", output: kind === "video" ? "カメラ移動と被写体の動きを含む動画成果物を生成しました。" : "プロンプトに沿った画像成果物を生成しました。", error: "" },
+    { id: "verifier", name: "Nexa", model: "Nexa", output: "成果物の保存先、プレビュー形式、メタデータを確認しました。", error: "" }
   ];
 }
 
 function mediaCompletionText(label, artifact, flags = {}) {
-  if (flags.usedSora) {
-    return `Sora動画生成が完了しました。\n\n${artifact.title}`;
-  }
-  if (flags.usedLtx) {
-    return `高品質LTX動画生成が完了しました。\n\nローカルのLTX-VideoモデルでMP4を生成し、アプリ内プレビュー用に保存しました。\n\n${artifact.title}`;
-  }
-  if (flags.usedComfy) {
-    return `無料ローカル動画生成が完了しました。\n\nComfyUI workflowから生成した動画を保存しました。\n\n${artifact.title}`;
-  }
-  if (flags.usedBuiltInVideo) {
-    return `内蔵Kino動画生成が完了しました。\n\nインストール直後でも使える内蔵レンダラーが、プロンプトに合わせたシーンを実際のWebM動画として保存しました。\n\n${artifact.title}`;
+  if (flags.usedSora || flags.usedLtx || flags.usedComfy || flags.usedBuiltInVideo) {
+    return `Nexa動画生成が完了しました。\n\nチャット内プレビュー用に保存しました。\n\n${artifact.title}`;
   }
   if (flags.localFallbackVideo) {
-    return `動画生成エンジンがWebMを書き出せなかったため、HTMLプレビューを作成しました。\n\n${artifact.fallbackReason ? `理由: ${artifact.fallbackReason}\n\n` : ""}${artifact.title}`;
+    return `Nexa動画生成のプレビューを作成しました。\n\n${artifact.fallbackReason ? `理由: ${artifact.fallbackReason}\n\n` : ""}${artifact.title}`;
   }
   return `${label}が完了しました。\n\n${artifact.title}`;
 }
 
 function mediaCompletionTextClean(label, artifact, flags = {}) {
-  if (flags.usedSora) {
-    return `Sora動画生成が完了しました。\n\n${artifact.title}`;
-  }
-  if (flags.usedLtx) {
-    return `高品質LTX動画生成が完了しました。\n\nローカルのLTX-VideoモデルでMP4を生成し、アプリ内プレビュー用に保存しました。\n\n${artifact.title}`;
-  }
-  if (flags.usedComfy) {
-    return `無料ローカル動画生成が完了しました。\n\nComfyUI workflowから生成した動画を保存しました。\n\n${artifact.title}`;
-  }
-  if (flags.usedBuiltInVideo) {
+  if (flags.usedSora || flags.usedLtx || flags.usedComfy || flags.usedBuiltInVideo) {
     return [
-      "内蔵Kino動画生成が完了しました。",
+      "Nexa動画生成が完了しました。",
       "",
-      "高品質LTX/ComfyUIモデルがまだ使えないため、内蔵レンダラーでWebM動画を保存しました。",
-      artifact.fallbackReason ? `高品質側の理由: ${artifact.fallbackReason}` : "",
+      "チャット内プレビュー用に動画成果物を保存しました。",
+      artifact.fallbackReason ? `補足: ${artifact.fallbackReason}` : "",
       "",
       artifact.title
     ].filter((line) => line !== "").join("\n");
   }
   if (flags.localFallbackVideo) {
     return [
-      "動画生成エンジンがMP4/WebMを保存できなかったため、HTMLプレビューを作成しました。",
+      "Nexa動画生成のプレビューを作成しました。",
       artifact.fallbackReason ? `理由: ${artifact.fallbackReason}` : "",
       "",
       artifact.title
@@ -5868,13 +7011,9 @@ async function generateMediaArtifact(body, kind) {
   const usedBuiltInVideo = cleanKind === "video" && /^kino-builtin-video/i.test(artifact.provider || "");
   const displayLabel = cleanKind === "video" ? "動画生成" : "画像生成";
   const localFallbackVideo = cleanKind === "video" && !usedSora && !usedLtx && !usedComfy;
-  const legacyCompletionText = usedSora
-    ? `Sora動画生成が完了しました。\n\n${artifact.title}`
-    : usedComfy
-      ? `無料ローカル動画生成が完了しました。\n\nComfyUI workflowから生成した動画を保存しました。\n\n${artifact.title}`
-      : localFallbackVideo
-        ? `無料動画生成エンジンがまだ同梱/準備されていないため、今回はローカル映像プレビューを作成しました。\n\n配布版では engines/ComfyUI と engines/workflows/video-api.json を同梱すると、ユーザー設定なしで Wan / HunyuanVideo / LTX-Video / Stable Video Diffusion系の無料モデル生成に切り替わります。\n\n${artifact.fallbackReason ? `理由: ${artifact.fallbackReason}\n\n` : ""}${artifact.title}`
-      : `${label}が完了しました。\n\n${artifact.title}`;
+  const legacyCompletionText = localFallbackVideo
+    ? `Nexa動画生成のプレビューを作成しました。\n\n${artifact.fallbackReason ? `理由: ${artifact.fallbackReason}\n\n` : ""}${artifact.title}`
+    : `${label}が完了しました。\n\n${artifact.title}`;
   const completionText = mediaCompletionTextClean(displayLabel, artifact, {
     usedSora,
     usedLtx,
@@ -5972,6 +7111,39 @@ function sse(res) {
   };
 }
 
+/**
+ * Executes the safe, read-only preparation part of a Nexa 3.0 tool plan.
+ * File writes and terminal commands remain in the existing code workflow where
+ * permission checks and post-write verification already exist.
+ */
+async function executeNexaToolPlan(pipeline, project, userText, attachments = []) {
+  const tools = pipeline?.toolExecutor?.tools || [];
+  const results = [];
+  const shouldReadWorkspace = tools.includes("file-system");
+  const autoContext = shouldReadWorkspace
+    ? await workspaceAutoContext(project, userText, attachments)
+    : [];
+
+  if (tools.includes("memory")) {
+    results.push({ tool: "memory", status: "complete", result: recentActionHints(project).slice(0, 5) });
+  }
+  if (tools.includes("rag")) {
+    results.push({ tool: "rag", status: "complete", result: attachments.map((item) => item.name).slice(0, 12) });
+  }
+  if (shouldReadWorkspace) {
+    results.push({ tool: "file-system", status: "complete", result: contextSummary(autoContext) });
+  }
+  if (tools.includes("terminal")) {
+    results.push({ tool: "terminal", status: "deferred", result: "コード変更後の検証時に実行" });
+  }
+  if (tools.includes("web-search")) {
+    results.push({ tool: "web-search", status: "planned", result: "検索プロバイダーが有効な場合のみ実行" });
+  }
+
+  pipeline.toolExecutor.results = results;
+  return { autoContext, results };
+}
+
 async function chatStream(req, res) {
   const send = sse(res);
   try {
@@ -5983,12 +7155,19 @@ async function chatStream(req, res) {
       return;
     }
 
-    const userText = String(body.message || "").trim();
-    if (!userText) {
+    const submittedText = String(body.message || "").trim();
+    if (!submittedText) {
       send("error", { error: "empty_message" });
       res.end();
       return;
     }
+    let resumedSafetyPlan = pendingSafetyPlanContinuation(project, submittedText);
+    let userText = resumedSafetyPlan
+      ? `${resumedSafetyPlan.executableRequest}\n直前に提示した安全な代替案に沿って進め、破壊的変更の前に最終確認を取って。`
+      : submittedText;
+    let safetyDecision = null;
+    let codeFollowUpDecision = null;
+    resolveLatestChoiceRequest(project);
 
     let creditCharge = null;
     try {
@@ -6012,7 +7191,7 @@ async function chatStream(req, res) {
       const userMessage = {
         id: id("msg"),
         role: "user",
-        content: userText,
+        content: submittedText,
         attachments: attachments.map(({ id: fileId, name, type, size, source, path: contextPath }) => ({
           id: fileId,
           name,
@@ -6056,7 +7235,7 @@ async function chatStream(req, res) {
     const userMessage = {
       id: id("msg"),
       role: "user",
-      content: userText,
+      content: submittedText,
       attachments: attachments.map(({ id: fileId, name, type, size, source, path: contextPath }) => ({
         id: fileId,
         name,
@@ -6131,11 +7310,11 @@ async function chatStream(req, res) {
       id: id("msg"),
       role: "assistant",
       content: "",
-      model: finalModel || "local-fallback",
+      model: publicModelName(finalModel || "local-fallback"),
       agents: outputs.map((item) => ({
         id: item.agent.id,
-        name: item.agent.name,
-        model: item.model || "local-fallback",
+        name: "Nexa",
+        model: publicModelName(item.model || "local-fallback"),
         error: item.error || ""
       })),
       createdAt: now()
@@ -6163,7 +7342,7 @@ async function chatStream(req, res) {
         const fallback = [
           "了解です。プロジェクト履歴、添付、ツール状況を統合して進めます。",
           "",
-          outputs.map((item) => `- ${item.agent.title}: ${clip(item.output, 170)}`).join("\n"),
+          outputs.map((item) => `- Nexa: ${sanitizeNexaVisibleText(clip(item.output, 170))}`).join("\n"),
           "",
           "この内容はプロジェクト記憶に保存されるため、次回「前回の続きをやって」で再開できます。"
         ].join("\n");
@@ -6175,7 +7354,7 @@ async function chatStream(req, res) {
       }
     } catch (error) {
       const fallback = `Ollama応答中に問題が起きました: ${error.message}\n\n${outputs
-        .map((item) => `## ${item.agent.title}\n${item.output}`)
+        .map((item) => `## Nexa\n${sanitizeNexaVisibleText(item.output)}`)
         .join("\n\n")}`;
       assistantMessage.content = fallback;
       send("assistant-delta", { id: assistantMessage.id, delta: fallback });
@@ -6192,10 +7371,10 @@ async function chatStream(req, res) {
       createdAt: now(),
       agents: outputs.map((item) => ({
         id: item.agent.id,
-        name: item.agent.name,
-        title: item.agent.title,
-        model: item.model || "local-fallback",
-        output: clip(item.output, 1800),
+        name: "Nexa",
+        title: "Nexa",
+        model: publicModelName(item.model || "local-fallback"),
+        output: sanitizeNexaVisibleText(clip(item.output, 1800)),
         error: item.error || ""
       })),
       webResults,
@@ -6217,20 +7396,20 @@ async function chatStream(req, res) {
 }
 
 const COMPANY_AGENT_ORDER = [
-  ["orchestrator", "Astra"],
-  ["planner", "Lattice"],
-  ["memory", "Mneme"],
-  ["toolRouter", "Navi"],
-  ["reasoner", "Helix"],
-  ["strategist", "Sage"],
-  ["coder", "Forge"],
-  ["researcher", "Quanta"],
-  ["secondOpinion", "Mira"],
-  ["critic", "Prism"],
-  ["verifier", "Proof"],
-  ["selfEvaluator", "Vela"],
-  ["security", "Sentinel"],
-  ["responseGenerator", "Auralis"]
+  ["orchestrator", "司令塔"],
+  ["planner", "計画"],
+  ["memory", "記憶"],
+  ["toolRouter", "ツール"],
+  ["reasoner", "推論"],
+  ["strategist", "設計"],
+  ["coder", "コード"],
+  ["researcher", "調査"],
+  ["secondOpinion", "別視点"],
+  ["critic", "批評"],
+  ["verifier", "検証"],
+  ["selfEvaluator", "品質"],
+  ["security", "安全"],
+  ["responseGenerator", "応答"]
 ];
 
 function includesAnyText(text, terms = []) {
@@ -6241,7 +7420,11 @@ function includesAnyText(text, terms = []) {
 function continuationHintFromProject(project = null) {
   if (!project) return "";
   const memory = normalizeProjectMemory(project);
+  const recentAssistant = [...(project.messages || [])]
+    .reverse()
+    .find((message) => message.role === "assistant" && String(message.content || "").trim());
   return [
+    recentAssistant ? `直前の回答: ${clip(stripThinking(recentAssistant.content || ""), 420)}` : "",
     memory.lastContinuation,
     ...(memory.next || []).slice(-2),
     ...(memory.tasks || []).slice(-2),
@@ -6253,13 +7436,47 @@ function continuationHintFromProject(project = null) {
     .find(Boolean) || "";
 }
 
+function latestImplementationRequest(project = null) {
+  const messages = [...(project?.messages || [])].reverse();
+  const candidate = messages.find((message) => {
+    if (message.role !== "user") return false;
+    const text = String(message.content || "").trim();
+    if (!text || isExplicitSafetyApproval(text)) return false;
+    if (/^(?:動かない|動くようにして|動かして|起動しない|起動できるようにして|反応しない|表示されない|エラー|バグ|直して)[よね。.!！\s]*$/i.test(text)) return false;
+    return /(作って|作成|実装|ゲーム|アプリ|サイト|LP|コード|修正|変更|追加|削除|build|create|implement|fix)/i.test(text);
+  });
+  return candidate ? executableRequestFromSafetyPrompt(candidate.content) : "";
+}
+
+function resolveCodeFollowUpContext(project, submittedText = "") {
+  const text = String(submittedText || "").trim();
+  const failure = /(?:動かない|動くようにして|動かして|起動しない|起動できるようにして|反応しない|表示されない|開かない|正常に動作させて|エラー(?:が出る|出た)?|バグ(?:がある)?|壊れた|失敗した)/i.test(text);
+  if (!failure || !project?.workspaceReady) return null;
+  const previousGoal = latestImplementationRequest(project);
+  return {
+    action: "debug",
+    confidence: previousGoal ? 0.97 : 0.82,
+    source: "context-decision-ai",
+    previousGoal,
+    effectiveRequest: [
+      previousGoal ? `直前の実装目的: ${previousGoal}` : "直前に選択フォルダーへ実装したコード",
+      `現在の報告: ${text}`,
+      "新規アプリとして作り直さず、現在のファイルを読み、起動方法と実行時エラーを確認し、根本原因を修正してから再テストして。"
+    ].join("\n")
+  };
+}
+
 function analyzeUserIntent(userText = "", project = null) {
   const text = String(userText || "").trim();
   const lower = text.toLowerCase();
   const compact = lower.replace(/\s+/g, "");
   const charCount = [...text].length;
   const isTerse = charCount > 0 && charCount <= 24;
-  const continuation = /^(continue|next|go on|resume|more)$/i.test(compact) ||
+  const failureFollowUp = isTerse && /(?:動かない|動くようにして|動かして|起動しない|起動できるようにして|反応しない|表示されない|開かない|正常に動作させて|エラー|バグ|壊れた|失敗)/i.test(text);
+  const contextualFollowUp = isTerse && Boolean(continuationHintFromProject(project)) && includesAnyText(text, [
+    "初心者", "わかりやすく", "分かりやすく", "簡単に", "詳しく", "短く", "もっと", "それ", "これ", "さっき", "前の", "上の", "その", "動かない", "動くように", "動かして", "起動しない", "起動できるように", "反応しない", "表示されない", "開かない", "エラー", "バグ", "壊れた"
+  ]);
+  const continuation = contextualFollowUp || /^(continue|next|go on|resume|more)$/i.test(compact) ||
     includesAnyText(text, [
       "\u7d9a\u304d",
       "\u3064\u3065\u304d",
@@ -6306,7 +7523,7 @@ function analyzeUserIntent(userText = "", project = null) {
     includesAnyText(text, ["\u52d5\u753b\u751f\u6210", "\u52d5\u753b\u4f5c\u3063\u3066", "\u52d5\u753b"]);
   const research = /research|web|search|latest|news|compare|source|cite/i.test(lower) ||
     includesAnyText(text, ["\u8abf\u3079", "\u691c\u7d22", "\u6700\u65b0", "\u30cb\u30e5\u30fc\u30b9", "\u6bd4\u8f03", "\u6839\u62e0", "\u51fa\u5178"]);
-  const repair = /fix|repair|debug|improve|refactor|polish/i.test(lower) ||
+  const repair = failureFollowUp || /fix|repair|debug|improve|refactor|polish/i.test(lower) ||
     includesAnyText(text, ["\u4fee\u6b63", "\u76f4\u3057", "\u6539\u5584", "\u30d0\u30b0", "\u30a8\u30e9\u30fc", "\u4ed5\u4e0a\u3052"]);
   const create = /create|make|build|implement|write|generate/i.test(lower) ||
     includesAnyText(text, ["\u4f5c\u3063\u3066", "\u4f5c\u6210", "\u5b9f\u88c5", "\u66f8\u3044\u3066", "\u751f\u6210"]);
@@ -6320,7 +7537,7 @@ function analyzeUserIntent(userText = "", project = null) {
   else if (image) taskKind = "image_generation";
   else if (folderOverview) taskKind = "folder_overview";
   else if (codeCapability) taskKind = "code_capability";
-  else if (codeWrite && repair) taskKind = "code_modify";
+  else if ((codeWrite || failureFollowUp) && repair) taskKind = "code_modify";
   else if (codeWrite || create) taskKind = "code_create";
   else if (research) taskKind = "research";
   else if (explain) taskKind = "explain";
@@ -6332,7 +7549,7 @@ function analyzeUserIntent(userText = "", project = null) {
     /server\.mjs|public\/|app\.js|styles\.css|package\.json|implement|build|installer|dist/i.test(lower) ||
     includesAnyText(text, ["このアプリ", "今のアプリ", "Nexa", "実装", "修正", "アップデート", "ビルド", "インストーラー"])
   );
-  const needsCode = selfImprovementWantsCode ||
+  const needsCode = selfImprovementWantsCode || failureFollowUp ||
     taskKind === "code_create" ||
     taskKind === "code_modify" ||
     codeWrite;
@@ -6344,7 +7561,7 @@ function analyzeUserIntent(userText = "", project = null) {
   if (taskKind === "self_improvement") {
     likelyDeliverables.push("server-side intent routing", "agent prompts", "memory updates", "verification improvements");
     if (chatGptLevel) {
-      likelyDeliverables.push("ChatGPT-style answer contract", "stricter self-evaluation", "short prompt intent recovery");
+      likelyDeliverables.push("Nexa answer contract", "stricter self-evaluation", "short prompt intent recovery");
     }
   } else if (needsCode) {
     likelyDeliverables.push(...inferRequestedFiles(text));
@@ -6364,6 +7581,8 @@ function analyzeUserIntent(userText = "", project = null) {
     confidence: selfImprovement || codeWrite || image || video || research ? "high" : isTerse ? "medium" : "medium-high",
     isTerse,
     continuation,
+    contextualFollowUp,
+    failureFollowUp,
     continuationHint,
     selfImprovement,
     chatGptLevel,
@@ -6376,7 +7595,7 @@ function analyzeUserIntent(userText = "", project = null) {
     needsWorkspaceContext,
     inferredGoal: selfImprovement
       ? chatGptLevel
-        ? "Improve Nexa toward ChatGPT-style usefulness: infer short intent, use memory and workspace context, route tools, self-check answers, revise weak replies, and avoid overclaiming literal ChatGPT parity."
+        ? "Improve Nexa usefulness: infer short intent, use memory and workspace context, route tools, self-check answers, revise weak replies, and avoid overclaiming."
         : "Improve Nexa's own ability to infer intent, route work, use memory, write code reliably, and avoid unnecessary questions."
       : needsCode
         ? "Implement the requested change in the selected workspace using safe concrete defaults."
@@ -6494,6 +7713,37 @@ function assistantSelfIntroductionReply(userText = "") {
     "私は、あなたの作業を手伝うAIアシスタントです。",
     "会話の整理、文章作成、コードの相談、ファイルを参考にした回答などを手伝えます。",
     "必要なときは短く、作業を進めるときは手順やコードまで具体的に返します。"
+  ].join("\n");
+}
+
+function assistantChatCapabilityReply(userText = "", mode = "") {
+  if (normalizeChatMode(mode) !== "chat") return "";
+  const text = String(userText || "").replace(/\s+/g, "").trim();
+  const asksCapability = /あなた|君|きみ|AI|アシスタント/.test(text) && /何ができる|できること|手伝える|何をする|何してくれる/.test(text);
+  if (!asksCapability) return "";
+  return [
+    "会話や相談、文章の作成・要約、アイデア出し、勉強や調べものの整理を手伝えます。",
+    "添付した内容をもとに考えをまとめることもできます。気になることをそのまま送ってください。"
+  ].join("\n");
+}
+
+function assistantNexaStrengthsReply(userText = "", mode = "") {
+  if (normalizeChatMode(mode) !== "chat") return "";
+  const text = String(userText || "").replace(/\s+/g, "").trim();
+  const asksAboutNexa = /(?:Nexa|ネクサ).{0,24}(?:強み|特徴|得意|できること|仕組み)/i.test(text) ||
+    /(?:強み|特徴|得意|できること|仕組み).{0,24}(?:Nexa|ネクサ)/i.test(text);
+  if (!asksAboutNexa) return "";
+
+  return [
+    "Nexaの強みは、会話だけで終わらせず、プロジェクト単位で作業を続けられるところです。",
+    "",
+    "1. 会話の流れを使える: 同じチャットの直近のやり取りを参照するので、「詳しく」「初心者向けに」のような続きの指示を前の話題につなげます。",
+    "2. プロジェクトで整理できる: チャット、選択フォルダー、添付、作業履歴をプロジェクトごとに保持します。再起動後も続きから進められます。",
+    "3. モードを分けられる: チャットモードは会話に集中し、コードモードでは選択フォルダー内のファイル確認・変更・検証を扱います。",
+    "4. 作業を見える化できる: 計画、文脈確認、実装、検証などの進行状況をチャット内と右側のチーム表示に出します。",
+    "5. 安全に作業できる: アクセス権とフォルダー範囲を分け、危険な操作は確認を求める設計です。",
+    "",
+    "正直にいうと、Nexa3.0はモデル本体の性能を表す客観的な知能レベルではありません。選択中の実行モデルに、会話履歴、プロジェクト記憶、ツール制御、品質確認を組み合わせて使いやすくする仕組みです。"
   ].join("\n");
 }
 
@@ -6762,7 +8012,7 @@ function deepReasoningProfile(userText = "", route = {}, options = {}) {
   ];
   return {
     enabled,
-    label: enabled ? "Opus-style deep pass" : "standard pass",
+    label: enabled ? "Nexa deep pass" : "standard pass",
     depth: enabled ? 3 : 1,
     lanes: enabled ? lanes : lanes.slice(0, 3),
     successCriteria: [
@@ -6770,8 +8020,8 @@ function deepReasoningProfile(userText = "", route = {}, options = {}) {
       "Use project memory and selected workspace when relevant.",
       "Prefer concrete implementation over vague advice.",
       "Do not end with unnecessary questions.",
-      "For ChatGPT-level requests, improve the system workflow honestly without claiming literal model parity.",
-      "Avoid claiming real Claude Opus parity unless an Opus-class model is actually configured."
+      "For high-intelligence requests, improve the system workflow honestly without claiming literal model parity.",
+      "Avoid claiming parity with external AI products."
     ]
   };
 }
@@ -6812,7 +8062,7 @@ function inferRequestedFiles(userText = "") {
     files.add("package.json");
     files.add("src/index.js");
   }
-  return [...files].slice(0, 12);
+  return [...files];
 }
 
 function buildTaskBrief(project, userText = "", route = {}) {
@@ -6874,14 +8124,14 @@ function chatGptGradeResponseContract(project, userText = "", route = {}) {
     ? (project.workspaceRoot || project.selectedFolderPath || project.selectedFolderName || "selected workspace")
     : "no selected workspace";
   return [
-    "ChatGPT-grade response contract for Nexa:",
+    "Nexa quality response contract:",
     "- Reconstruct the user's real goal from the latest message, recent chat, project memory, and selected workspace.",
     "- For short prompts, infer the most useful next action first; ask only if every safe path is blocked.",
     "- Separate facts from assumptions. If a capability is not actually available, say so and provide the closest useful alternative.",
     "- Prefer concrete outcomes: changed files, verified behavior, settings applied, clear next state, or a direct answer.",
     "- Run a self-check before final: latest request answered, no stale task drift, no hidden reasoning, no fake capability claim, no needless final question.",
     "- For self-improvement requests, report honest before/after capability level and the actual workflow improvements.",
-    "- Do not claim Nexa literally equals ChatGPT, Claude, Opus, Sora, or any external model unless that provider/model is configured.",
+    "- Do not claim Nexa literally equals external AI products or providers.",
     `- Workspace context: ${workspace}.`
   ].join("\n");
 }
@@ -6903,7 +8153,7 @@ function buildAnswerBlueprint(project, userText = "", route = {}, relevantMemory
     mustInclude.push(
       "Explain what made Nexa smarter in concrete system terms.",
       "Mention intent recovery, memory/context use, answer blueprint, self-evaluation, and revision gate.",
-      "Report the honest current capability level and the limitation that local models are not literally ChatGPT."
+      "Report the honest current capability level and the limitation that local models still have limits."
     );
     evidence.push("Expected proof: changed app workflow, quality gate, build/test result, installer version when available.");
   }
@@ -6913,6 +8163,10 @@ function buildAnswerBlueprint(project, userText = "", route = {}, relevantMemory
   }
   if (intent.isTerse) {
     mustInclude.push("Treat the short prompt as a continuation of the project goal before asking for detail.");
+  }
+  if (intent.continuationHint) {
+    mustInclude.push("Treat the latest request as a continuation or reformulation of the immediately preceding answer.");
+    evidence.push(`Immediate conversation anchor: ${clip(intent.continuationHint, 420)}`);
   }
   if (intent.videoUnsupported) {
     mustInclude.push("Say video generation is disabled in this build and offer image/storyboard alternatives.");
@@ -6940,26 +8194,23 @@ function buildAnswerBlueprint(project, userText = "", route = {}, relevantMemory
 function deterministicSmartnessFallback(company = {}, quality = {}) {
   const intent = company.intent || {};
   if (!intent.selfImprovement && !intent.chatGptLevel) return "";
-  const intelligence = company.intelligence || {};
-  const before = intelligence.beforeLevel ?? SMARTNESS_BASELINE.beforeLevel;
-  const after = intelligence.afterLevel ?? SMARTNESS_BASELINE.afterLevel;
   const grade = quality?.grade ? ` / 品質${quality.grade}` : "";
   return [
-    "Nexaの賢さをさらに強化しました。",
+    "Nexa3.0では、回答の進め方を強化しました。",
     "",
-    `現在の自己評価は Lv${before} -> Lv${after}${grade} です。これはChatGPTそのものになったという意味ではなく、Nexa側の回答ワークフローをChatGPT風に近づけた評価です。`,
+    `これはモデル本体の知能を数値化したものではありません${grade}。ローカルモデルに、会話の文脈・記憶・計画・品質確認を組み合わせる仕組みを追加した更新です。`,
     "",
     "強化した内容:",
     "- 短い依頼でも、直近の会話・プロジェクト記憶・選択フォルダーから目的を復元",
     "- 回答前に Answer blueprint を作り、最終回答に入れるべき要素を固定",
-    "- ChatGPT級の依頼では内部推論を自動で高め、意図理解・記憶利用・自己評価を優先",
-    "- Vela品質ゲートで、古い文脈へのズレ、過大表現、質問で終わる回答、内部メモ漏れを採点",
+    "- 高品質依頼では内部推論を自動で高め、意図理解・記憶利用・自己評価を優先",
+    "- Nexa品質ゲートで、古い文脈へのズレ、過大表現、質問で終わる回答、内部メモ漏れを採点",
     "- Choice gateで、曖昧な短文や危険操作は本文に質問を書かず、ユーザーが選べるカードとして出力",
-    "- 弱い回答は保存前に再生成し、ChatGPTやClaudeと同等だと誤解させる表現を抑制",
+    "- 弱い回答は保存前に再生成し、過大に見える表現を抑制",
     "",
     "残る制約:",
     "- ローカルモデル自体の知能は、インストールされているOllamaモデルに依存します。",
-    "- 本物のChatGPT級モデルを使うには、OpenAIなどの外部API設定が必要です。"
+    "- さらに高品質なクラウドモデルを使うには、外部API設定が必要です。"
   ].join("\n");
 }
 
@@ -6970,7 +8221,7 @@ async function compactAgentCall(model, name, instruction, context, options = {})
       {
         role: "system",
         content:
-          `You are ${name} in a local multi-agent assistant team. ` +
+          "You are Nexa in a local assistant workspace. " +
           "Return only concise useful notes. Do not answer the user directly."
       },
       { role: "user", content: `${instruction}\n\nContext:\n${context}` }
@@ -6994,11 +8245,21 @@ async function coderAgentCall(model, userText, context, options = {}) {
       {
         role: "system",
         content: [
-          "You are Forge, the implementation specialist in a local multi-agent assistant team.",
+          "You are Nexa, the implementation specialist in a local assistant workspace.",
           "Do not describe the assistant to the user using internal structure names.",
-          "Your job is to write actual implementation code, not only advice.",
+           "Your job is to write actual implementation code, not only advice.",
+           "Design every implementation from the current requirements and repository evidence. Do not reproduce a fixed Nexa template, canned landing page, canned game, or previous generated app.",
+           "For large applications, first derive architecture boundaries, data flow, persistence, error states, security boundaries, tests, and runnable scripts, then emit every required file rather than collapsing the result into a three-file demo.",
+           "Use the repository's existing framework and dependency conventions. Add a dependency only when it provides real domain value and include the required setup/configuration.",
+           "A request for high quality means production behavior: loading, empty, error and success states; responsive UI; accessibility; input validation; maintainable modules; and focused tests.",
+          "Treat every code-mode user message as a new implementation turn, including later messages in the same chat.",
+          "The latest user request always wins. Re-read the current workspace before every turn and do not reuse a previous result when the user requests a different app, design, feature, or variant in the same genre.",
+          "The selected workspace is the single source of truth. Never package code as a per-message download or create a new generated-project folder for each conversation.",
+          "Write, edit, or explicitly delete files in the selected workspace tree and report the resulting diff.",
           "When a selected workspace folder is present and the user asks to create new files or complete files, prefer fenced file blocks using real relative paths, for example ```file path=\"index.html\" followed by the full file content and a closing fence.",
           "The server writes these file blocks directly into the selected folder.",
+          "You may output any number of file blocks required for a complete implementation; there is no three-file limit.",
+          "When the user explicitly asks to delete a file, emit a fenced block like ```delete path=\"obsolete.js\" followed by a closing fence. Never delete a file unless the latest request clearly requires it.",
           "For landing pages, product pages, portfolios, profile pages, UI mockups, or any request containing LP/site/page/UI/design/neon, never output a plain unstyled HTML page.",
           "For those frontend requests, output at least index.html and style.css. Add app.js when interaction, animation, tabs, counters, or dynamic behavior improves the result.",
           "Frontend output must look production-ready: strong hero, clear sections, responsive layout, polished spacing, cards or bands where useful, hover states, accessible buttons, and coherent typography.",
@@ -7010,10 +8271,19 @@ async function coderAgentCall(model, userText, context, options = {}) {
           "Do not include explanatory text inside file blocks.",
           "If a patch is not appropriate, provide complete runnable code in file blocks.",
           "If the request targets this workspace, use the provided workspace context and avoid inventing unrelated files.",
+          "When coding-context-map is present, treat it as the source of truth for framework, scripts, existing file names, and local patterns.",
+          "For changes to an existing app, prefer a small unified diff over replacing entire large files.",
+          "Do not rewrite unrelated files. Touch only the files required to satisfy the request.",
+          "Preserve existing public APIs, storage formats, routes, CSS naming style, and UI behavior unless the user explicitly asks to replace them.",
+          "Before editing, infer the likely affected modules from file snapshots, package scripts, and recent project memory.",
+          "After editing, the result should pass obvious syntax checks and the project's available lint/typecheck/test commands when they exist.",
+          "If the selected workspace has package.json scripts, keep the implementation compatible with those scripts.",
+          "For bug fixes, identify the root cause in the existing code and patch that cause instead of adding a cosmetic workaround.",
+          "For feature requests, implement the smallest complete feature surface: state, UI, persistence, and event handlers when applicable.",
           "If the intent profile says self_improvement, treat the request as an implementation task for this assistant app itself.",
           "For self_improvement, prioritize intent routing, prompt quality, workspace context selection, memory updates, verifier checks, choice-request handling, and reliable direct file writes.",
           "For very short prompts, infer the user's goal from recent chat, project memory, selected workspace, and the intent profile instead of asking a generic question.",
-          "If the user asks for an app, page, game, tool, or script without exact filenames, infer a small conventional file structure and implement it.",
+          "If the user asks for an app, page, game, tool, or script without exact filenames, infer a conventional file structure with as many files as the complete implementation requires.",
           "If requirements are underspecified but a safe useful default exists, choose that default and implement it instead of asking questions.",
           "Only ask for user input when blocked by missing workspace access, destructive risk, credentials, or mutually exclusive product decisions.",
           "For browser apps, usually create index.html, style.css, and app.js when interactivity is requested; omit app.js for static pages.",
@@ -7033,8 +8303,8 @@ async function coderAgentCall(model, userText, context, options = {}) {
         ].join("\n\n")
       }
     ], {
-      numPredict: 1800,
-      temperature: 0.16,
+      numPredict: 6000,
+      temperature: 0.22,
       timeout: options.timeout ?? 90000,
       signal: options.signal,
       fallbackModel: options.fallbackModel,
@@ -7055,9 +8325,14 @@ async function strictCoderRepairCall(model, userText, context, previousOutput, f
           "You are a strict code-output repair agent.",
           "Return only valid writable artifacts.",
           "For new or full files, output fenced file blocks only, with real relative paths, like ```file path=\"index.html\".",
+          "Preserve every valid file requested by the user; there is no three-file limit.",
+          "For an explicitly requested deletion, output ```delete path=\"relative/file.ext\" with an empty fenced body.",
           "For LP/site/page/UI/design/neon/profile requests, include complete index.html and style.css, and app.js when motion or interaction improves the result.",
           "Do not repair a landing page into plain default HTML. It must have polished responsive CSS, hero, sections, CTA, and visual styling.",
           "For edits to existing files, output one valid unified diff only.",
+          "Use the workspace context to preserve existing architecture and file names.",
+          "If the failure is a formatting or path error, repair only the artifact format; do not change the user's requested feature.",
+          "If the failure is a check failure, produce a minimal patch that fixes the failing file and preserves previous successful changes.",
           "No prose, no analysis, no placeholder paths, no absolute paths, no markdown outside the artifact blocks."
         ].join(" ")
       },
@@ -7073,7 +8348,7 @@ async function strictCoderRepairCall(model, userText, context, previousOutput, f
         ].join("\n\n")
       }
     ], {
-      numPredict: 2200,
+      numPredict: 6500,
       temperature: 0.05,
       timeout: options.timeout ?? 90000,
       signal: options.signal,
@@ -7139,24 +8414,25 @@ function cleanGeneratedFileContent(content = "") {
 function extractGeneratedFileBlocks(text = "") {
   const source = String(text || "");
   const blocks = [];
-  const addBlock = (rawPath, rawContent) => {
+  const addBlock = (rawPath, rawContent, operation = "write") => {
     const filePath = normalizeGeneratedFilePath(rawPath);
     const content = cleanGeneratedFileContent(rawContent);
-    if (!filePath || !content.trim()) return;
-    blocks.push({ path: filePath, content });
+    if (!filePath || (operation !== "delete" && !content.trim())) return;
+    blocks.push({ path: filePath, content, operation });
   };
 
   const fence = /```([^\n`]*)\n([\s\S]*?)```/g;
   let match;
   while ((match = fence.exec(source))) {
     const info = String(match[1] || "").trim();
-    if (!/^file\b/i.test(info)) continue;
+    const operation = /^delete\b/i.test(info) ? "delete" : "write";
+    if (!/^(?:file|delete)\b/i.test(info)) continue;
     const pathMatch =
       info.match(/\bpath\s*=\s*"([^"]+)"/i) ||
       info.match(/\bpath\s*=\s*'([^']+)'/i) ||
-      info.match(/^file\s+(.+)$/i);
+      info.match(/^(?:file|delete)\s+(.+)$/i);
     if (!pathMatch) continue;
-    addBlock(pathMatch[1], match[2]);
+    addBlock(pathMatch[1], match[2], operation);
   }
 
   const loose = /(?:^|\n)file\s+path\s*=\s*["']([^"']+)["']\s*\n([\s\S]*?)(?=\n(?:text|コピー|copy)\s*(?:\n|$)|\nfile\s+path\s*=|\n```|$)/gi;
@@ -7170,6 +8446,7 @@ function extractGeneratedFileBlocks(text = "") {
 function generatedFileBlocksMarkdown(blocks = []) {
   return blocks
     .map((block) => {
+      if (block.operation === "delete") return `\`\`\`delete path="${block.path}"\n\`\`\``;
       const content = String(block.content || "").replace(/\s+$/g, "");
       return `\`\`\`file path="${block.path}"\n${content}\n\`\`\``;
     })
@@ -7672,10 +8949,1158 @@ async function needsLandingQualityUpgrade(project, userText = "", files = []) {
   return html.length < 1800 || css.length < 2200 || htmlScore < 3 || cssScore < 4;
 }
 
-function heuristicGeneratedFileBlocks(userText = "") {
+function isGenericCreateFallbackRequest(userText = "") {
   const text = String(userText || "");
+  const lower = text.toLowerCase();
+  const wantsCreate = /\b(create|make|build|generate|write|implement)\b/i.test(lower) ||
+    includesAnyText(text, ["作って", "作成", "実装", "生成", "書いて", "作る", "開発", "構築"]);
+  const isRepair = /\b(fix|repair|debug|refactor|change|update|delete|remove)\b/i.test(lower) ||
+    includesAnyText(text, ["修正", "直して", "改善", "変更", "追加", "削除", "バグ", "エラー"]);
+  return wantsCreate && !isRepair;
+}
+
+function isGameFallbackRequest(userText = "") {
+  const text = String(userText || "");
+  const apexMeansGame = /apex/i.test(text) && !/salesforce|soql|sosl|trigger|class|visualforce|lwc/i.test(text);
+  return apexMeansGame || /fps|game|shooter|battle|arena/i.test(text) ||
+    includesAnyText(userText, ["ゲーム", "FPS", "シューティング", "バトル", "アリーナ"]);
+}
+
+function is3DShooterRequest(userText = "") {
+  const text = String(userText || "");
+  const has3D = /\b3d\b|three\.js|webgl/i.test(text) || includesAnyText(text, ["3D", "三次元"]);
+  const hasShooter = /fps|shooter|shooting|gun|battle/i.test(text) ||
+    includesAnyText(text, ["シューティング", "射撃", "銃", "FPS", "バトル"]);
+  return has3D && hasShooter;
+}
+
+function requestedGameTitle(userText = "") {
+  const text = String(userText || "");
+  const named = text.match(/([A-Za-z][A-Za-z0-9 _-]{1,30})\s*(?:というタイトル|という名前)/i);
+  if (named?.[1]) return named[1].trim();
+  if (/\bapex\b/i.test(text)) return "Apex";
+  const descriptive = text
+    .replace(/(?:を)?(?:作って|作成して|開発して|実装して).*$/i, "")
+    .replace(/というタイトルの?/g, "")
+    .trim();
+  if (descriptive && descriptive.length <= 32) return descriptive;
+  return "Nexa Strike";
+}
+
+function prefixGeneratedBlocks(blocks = [], directory = "") {
+  const clean = String(directory || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!clean) return blocks;
+  return blocks.map((block) => ({ ...block, path: `${clean}/${block.path}` }));
+}
+
+function generic3DShooterFileBlocks(userText = "", directory = "") {
+  const title = requestedGameTitle(userText);
+  const blocks = [
+    {
+      path: "index.html",
+      content: `<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} | 3D Shooter</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="game" aria-label="${title} 3D shooter">
+    <div class="hud">
+      <div class="brand"><span>TACTICAL ARENA</span><strong>${title}</strong></div>
+      <div class="stats">
+        <span>HP <b id="health">100</b></span>
+        <span>SCORE <b id="score">0</b></span>
+        <span>WAVE <b id="wave">1</b></span>
+      </div>
+    </div>
+    <div class="crosshair" aria-hidden="true"></div>
+    <div id="damage" aria-hidden="true"></div>
+    <section id="start" class="start-screen">
+      <p>FRONTIER COMBAT SIMULATION</p>
+      <h1>${title}</h1>
+      <span>WASDで移動 / マウスで照準 / クリックで射撃</span>
+      <button id="startButton" type="button">戦闘を開始</button>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>`
+    },
+    {
+      path: "style.css",
+      content: `* { box-sizing: border-box; }
+:root { color-scheme: dark; font-family: Inter, "Segoe UI", sans-serif; }
+html, body, #game { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: #05070a; color: #f4f7fb; }
+canvas { display: block; }
+.hud { position: fixed; inset: 0 0 auto; z-index: 4; padding: 22px 28px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; background: linear-gradient(180deg, rgba(2,4,7,.82), transparent); }
+.brand { display: grid; gap: 3px; text-transform: uppercase; }
+.brand span { color: #78e4ff; font-size: 10px; letter-spacing: 2px; }
+.brand strong { font-size: 24px; letter-spacing: 1px; }
+.stats { display: flex; gap: 8px; }
+.stats span { min-width: 92px; padding: 9px 12px; border: 1px solid rgba(255,255,255,.14); background: rgba(8,12,17,.68); backdrop-filter: blur(14px); font-size: 11px; color: #99a6b5; }
+.stats b { display: block; margin-top: 2px; color: white; font-size: 18px; }
+.crosshair { position: fixed; z-index: 5; left: 50%; top: 50%; width: 18px; height: 18px; transform: translate(-50%,-50%); pointer-events: none; }
+.crosshair::before, .crosshair::after { content: ""; position: absolute; background: #e8fbff; box-shadow: 0 0 8px #50dfff; }
+.crosshair::before { width: 18px; height: 2px; top: 8px; }
+.crosshair::after { width: 2px; height: 18px; left: 8px; }
+#damage { position: fixed; inset: 0; z-index: 3; pointer-events: none; background: rgba(255,32,54,0); transition: background .12s; }
+#damage.hit { background: rgba(255,32,54,.22); }
+.start-screen { position: fixed; inset: 0; z-index: 10; display: grid; place-content: center; justify-items: center; gap: 14px; text-align: center; background: radial-gradient(circle at 50% 42%, rgba(21,58,75,.62), rgba(3,5,8,.94) 58%); }
+.start-screen.is-hidden { display: none; }
+.start-screen p { margin: 0; color: #69def7; font-size: 11px; letter-spacing: 3px; }
+.start-screen h1 { margin: 0; font-size: clamp(58px, 10vw, 130px); line-height: .9; text-transform: uppercase; }
+.start-screen span { color: #aeb8c5; }
+.start-screen button { margin-top: 16px; padding: 14px 26px; color: #041015; background: #74e9ff; border: 0; border-radius: 4px; font-weight: 800; cursor: pointer; box-shadow: 0 0 30px rgba(76,220,255,.3); }
+@media (max-width: 680px) { .hud { padding: 14px; } .brand strong { font-size: 17px; } .stats span { min-width: 62px; padding: 7px; } .stats b { font-size: 15px; } }`
+    },
+    {
+      path: "app.js",
+      content: `import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.js";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x071019);
+scene.fog = new THREE.Fog(0x071019, 18, 95);
+
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 180);
+camera.rotation.order = "YXZ";
+camera.position.set(0, 1.7, 10);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.querySelector("#game").prepend(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0x8bdfff, 0x10151e, 1.7));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(14, 24, 8);
+sun.castShadow = true;
+scene.add(sun);
+
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(140, 140),
+  new THREE.MeshStandardMaterial({ color: 0x111923, roughness: 0.82, metalness: 0.18 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+scene.add(new THREE.GridHelper(140, 70, 0x1c7891, 0x173342));
+
+const obstacleMaterial = new THREE.MeshStandardMaterial({ color: 0x24313d, roughness: 0.52, metalness: 0.45 });
+for (let i = 0; i < 34; i += 1) {
+  const height = 2 + Math.random() * 5;
+  const box = new THREE.Mesh(new THREE.BoxGeometry(2 + Math.random() * 4, height, 2 + Math.random() * 4), obstacleMaterial);
+  box.position.set((Math.random() - .5) * 100, height / 2, (Math.random() - .5) * 100);
+  if (box.position.length() < 13) box.position.x += 18;
+  box.castShadow = true;
+  box.receiveShadow = true;
+  scene.add(box);
+}
+
+const healthEl = document.querySelector("#health");
+const scoreEl = document.querySelector("#score");
+const waveEl = document.querySelector("#wave");
+const startScreen = document.querySelector("#start");
+const damage = document.querySelector("#damage");
+const keys = new Set();
+const enemies = [];
+const clock = new THREE.Clock();
+const raycaster = new THREE.Raycaster();
+let health = 100;
+let score = 0;
+let wave = 1;
+let yaw = 0;
+let pitch = 0;
+let nextDamage = 0;
+
+function spawnEnemy() {
+  const enemy = new THREE.Mesh(
+    new THREE.CapsuleGeometry(.65, 1.2, 5, 10),
+    new THREE.MeshStandardMaterial({ color: 0xff496c, emissive: 0x4a0612, roughness: .35, metalness: .35 })
+  );
+  const angle = Math.random() * Math.PI * 2;
+  const distance = 24 + Math.random() * 28;
+  enemy.position.set(camera.position.x + Math.cos(angle) * distance, 1.25, camera.position.z + Math.sin(angle) * distance);
+  enemy.userData.speed = 1.6 + Math.random() * .9 + wave * .08;
+  enemy.castShadow = true;
+  enemies.push(enemy);
+  scene.add(enemy);
+}
+
+function fillWave() {
+  const target = Math.min(5 + wave * 2, 24);
+  while (enemies.length < target) spawnEnemy();
+  waveEl.textContent = String(wave);
+}
+
+function shoot() {
+  if (document.pointerLockElement !== renderer.domElement || health <= 0) return;
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hit = raycaster.intersectObjects(enemies, false)[0];
+  if (!hit) return;
+  const index = enemies.indexOf(hit.object);
+  if (index >= 0) enemies.splice(index, 1);
+  scene.remove(hit.object);
+  hit.object.geometry.dispose();
+  hit.object.material.dispose();
+  score += 100;
+  scoreEl.textContent = String(score);
+  if (!enemies.length) { wave += 1; fillWave(); }
+}
+
+function updatePlayer(delta) {
+  const forward = Number(keys.has("KeyW") || keys.has("ArrowUp")) - Number(keys.has("KeyS") || keys.has("ArrowDown"));
+  const side = Number(keys.has("KeyD") || keys.has("ArrowRight")) - Number(keys.has("KeyA") || keys.has("ArrowLeft"));
+  const speed = keys.has("ShiftLeft") ? 10 : 6.5;
+  const direction = new THREE.Vector3(side, 0, -forward);
+  if (direction.lengthSq()) {
+    direction.normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    camera.position.addScaledVector(direction, speed * delta);
+  }
+  camera.position.x = THREE.MathUtils.clamp(camera.position.x, -66, 66);
+  camera.position.z = THREE.MathUtils.clamp(camera.position.z, -66, 66);
+  camera.rotation.set(pitch, yaw, 0);
+}
+
+function updateEnemies(delta, time) {
+  for (const enemy of enemies) {
+    const direction = camera.position.clone().sub(enemy.position);
+    direction.y = 0;
+    const distance = direction.length();
+    if (distance > 1.5) enemy.position.addScaledVector(direction.normalize(), enemy.userData.speed * delta);
+    enemy.lookAt(camera.position.x, enemy.position.y, camera.position.z);
+    if (distance < 2 && time > nextDamage) {
+      nextDamage = time + 650;
+      health = Math.max(0, health - 8);
+      healthEl.textContent = String(health);
+      damage.classList.add("hit");
+      setTimeout(() => damage.classList.remove("hit"), 130);
+      if (!health) {
+        document.exitPointerLock();
+        startScreen.classList.remove("is-hidden");
+        startScreen.querySelector("h1").textContent = "MISSION FAILED";
+        startScreen.querySelector("button").textContent = "再出撃";
+      }
+    }
+  }
+}
+
+function reset() {
+  for (const enemy of enemies.splice(0)) scene.remove(enemy);
+  health = 100; score = 0; wave = 1;
+  healthEl.textContent = "100"; scoreEl.textContent = "0"; waveEl.textContent = "1";
+  camera.position.set(0, 1.7, 10);
+  startScreen.classList.add("is-hidden");
+  fillWave();
+  renderer.domElement.requestPointerLock();
+}
+
+document.querySelector("#startButton").addEventListener("click", reset);
+renderer.domElement.addEventListener("click", shoot);
+addEventListener("keydown", event => keys.add(event.code));
+addEventListener("keyup", event => keys.delete(event.code));
+addEventListener("mousemove", event => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw -= event.movementX * .0022;
+  pitch = THREE.MathUtils.clamp(pitch - event.movementY * .0022, -1.35, 1.35);
+});
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(time) {
+  requestAnimationFrame(loop);
+  const delta = Math.min(clock.getDelta(), .05);
+  if (document.pointerLockElement === renderer.domElement && health > 0) {
+    updatePlayer(delta);
+    updateEnemies(delta, time);
+  }
+  renderer.render(scene, camera);
+}
+fillWave();
+requestAnimationFrame(loop);`
+    },
+    {
+      path: "README.md",
+      content: `# ${title}
+
+ブラウザで遊べる一人称視点の3Dシューティングゲームです。
+
+## 起動
+
+ローカルWebサーバーでこのフォルダーを配信し、index.htmlを開いてください。
+
+## 操作
+
+- WASD / 矢印キー: 移動
+- Shift: ダッシュ
+- マウス: 照準
+- クリック: 射撃
+
+Three.jsはCDNから読み込むため、初回起動時はインターネット接続が必要です。
+
+Windowsでは \`start-game.cmd\` をダブルクリックすると、ローカルサーバーとゲームが起動します。`
+    },
+    {
+      path: "server.mjs",
+      content: `import http from "node:http";
+import path from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const port = 4173;
+const mime = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8" };
+
+http.createServer(async (req, res) => {
+  try {
+    const requested = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+    const relative = requested === "/" ? "index.html" : requested.replace(/^\\/+/, "");
+    const target = path.resolve(root, relative);
+    if (target !== root && !target.startsWith(root + path.sep)) throw new Error("forbidden");
+    const info = await stat(target);
+    if (!info.isFile()) throw new Error("not_found");
+    res.writeHead(200, { "content-type": mime[path.extname(target).toLowerCase()] || "application/octet-stream", "cache-control": "no-store" });
+    res.end(await readFile(target));
+  } catch {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Not found");
+  }
+}).listen(port, "127.0.0.1", () => console.log("Game ready: http://127.0.0.1:" + port));`
+    },
+    {
+      path: "start-game.cmd",
+      content: `@echo off
+cd /d "%~dp0"
+start "Nexa Game Server" /min cmd /c node server.mjs
+timeout /t 2 /nobreak >nul
+start "" http://127.0.0.1:4173
+`
+    }
+  ];
+  return prefixGeneratedBlocks(blocks, directory);
+}
+
+function genericNodeApiFileBlocks(userText = "") {
+  const description = clip(String(userText || "API service").replace(/[`<>]/g, ""), 180);
+  return [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        name: "nexa-api-service",
+        version: "1.0.0",
+        private: true,
+        type: "module",
+        scripts: { start: "node src/server.js", check: "node --check src/server.js" }
+      }, null, 2)
+    },
+    {
+      path: "src/store.js",
+      content: `const records = new Map();
+
+export function listRecords() {
+  return [...records.values()];
+}
+
+export function createRecord(input = {}) {
+  const id = crypto.randomUUID();
+  const record = { id, title: String(input.title || "Untitled").slice(0, 120), createdAt: new Date().toISOString() };
+  records.set(id, record);
+  return record;
+}
+
+export function deleteRecord(id) {
+  return records.delete(id);
+}`
+    },
+    {
+      path: "src/server.js",
+      content: `import http from "node:http";
+import { createRecord, deleteRecord, listRecords } from "./store.js";
+
+const port = Number(process.env.PORT || 3000);
+
+function send(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
+  res.end(body);
+}
+
+async function readJson(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString("utf8");
+  return text ? JSON.parse(text) : {};
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+  if (req.method === "GET" && url.pathname === "/api/records") return send(res, 200, { records: listRecords() });
+  if (req.method === "POST" && url.pathname === "/api/records") return send(res, 201, { record: createRecord(await readJson(req)) });
+  const match = url.pathname.match(/^\\/api\\/records\\/([^/]+)$/);
+  if (req.method === "DELETE" && match) return send(res, deleteRecord(match[1]) ? 200 : 404, { ok: true });
+  return send(res, 404, { error: "not_found" });
+});
+
+server.listen(port, () => console.log(\`API running at http://localhost:\${port}\`));`
+    },
+    {
+      path: "README.md",
+      content: `# Nexa API Service
+
+Generated from: ${description}
+
+## Start
+
+\`\`\`powershell
+npm start
+\`\`\`
+
+- GET /health
+- GET /api/records
+- POST /api/records
+- DELETE /api/records/:id`
+    }
+  ];
+}
+
+function genericPythonToolFileBlocks(userText = "") {
+  const description = clip(String(userText || "Python tool").replace(/[`<>]/g, ""), 180);
+  return [
+    {
+      path: "main.py",
+      content: `from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=${JSON.stringify(description)})
+    parser.add_argument("input", nargs="?", help="Input text or file path")
+    parser.add_argument("--output", type=Path, help="Optional JSON output path")
+    return parser
+
+
+def run(value: str | None) -> dict[str, object]:
+    source = value or ""
+    path = Path(source)
+    text = path.read_text(encoding="utf-8") if source and path.is_file() else source
+    return {"ok": True, "characters": len(text), "lines": len(text.splitlines()), "text": text}
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    result = run(args.input)
+    output = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.output:
+        args.output.write_text(output + "\\n", encoding="utf-8")
+    else:
+        print(output)
+
+
+if __name__ == "__main__":
+    main()
+`
+    },
+    {
+      path: "test_main.py",
+      content: `import unittest
+
+from main import run
+
+
+class RunTests(unittest.TestCase):
+    def test_counts_text(self) -> None:
+        result = run("hello\\nworld")
+        self.assertEqual(result["characters"], 11)
+        self.assertEqual(result["lines"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
+`
+    },
+    {
+      path: "README.md",
+      content: `# Python Tool
+
+Generated from: ${description}
+
+## Run
+
+\`\`\`powershell
+python main.py "sample text"
+python -m unittest
+\`\`\``
+    }
+  ];
+}
+
+function genericCreateFileBlocks(userText = "") {
+  const text = String(userText || "");
+  if (is3DShooterRequest(text)) return generic3DShooterFileBlocks(text);
+  if (isGameFallbackRequest(text)) return genericArenaGameFileBlocks(text);
+  if (/python|\.py\b|cli|command.?line/i.test(text) || includesAnyText(text, ["Python", "CLI", "コマンドライン"])) {
+    return genericPythonToolFileBlocks(text);
+  }
+  if (/\bapi\b|backend|server|node(?:\.js)?|rest/i.test(text) || includesAnyText(text, ["API", "バックエンド", "サーバー"])) {
+    return genericNodeApiFileBlocks(text);
+  }
+  return genericInteractiveAppFileBlocks(text);
+}
+
+function fallbackBlocksForWeakGeneratedBlocks(userText = "", blocks = []) {
+  if (!isGameFallbackRequest(userText)) return { blocks: [], reason: "" };
+  if (!blocks.length) {
+    return {
+      blocks: is3DShooterRequest(userText) ? generic3DShooterFileBlocks(userText) : genericArenaGameFileBlocks(userText),
+      reason: "モデル出力に保存可能なゲームファイルがなかったため、直前のゲーム目的を保った実行構成へ補正します。"
+    };
+  }
+  const paths = blocks.map((block) => String(block.path || "").replace(/\\/g, "/").toLowerCase());
+  const combined = blocks.map((block) => `${block.path}\n${block.content || ""}`).join("\n").toLowerCase();
+  const hasIndex = paths.some((item) => /(^|\/)index\.html?$/.test(item));
+  const hasScript = paths.some((item) => /\.(js|mjs|ts|tsx|jsx)$/.test(item));
+  const hasStyle = paths.some((item) => /\.css$/.test(item));
+  const needs3D = is3DShooterRequest(userText);
+  const hasGameSignals = needs3D
+    ? /three|webgl|perspectivecamera|scene|raycaster/.test(combined)
+    : /canvas|score|player|enemy|wave|hp|shoot|arena|game|fps|battle/.test(combined);
+  const hasNonGameApexFile = paths.some((item) => /\.(cls|trigger)$/.test(item));
+  if (hasIndex && hasScript && hasStyle && hasGameSignals && !hasNonGameApexFile) {
+    return { blocks: [], reason: "" };
+  }
+  return {
+    blocks: needs3D ? generic3DShooterFileBlocks(userText) : genericArenaGameFileBlocks(userText),
+    reason: hasNonGameApexFile
+      ? "Apexをゲーム制作として解釈し、クラスファイルではなく操作できるWebゲーム構成へ切り替えます。"
+      : "ゲームとして開ける構成が不足していたため、HTML/CSS/JavaScriptの実行できる構成へ補正します。"
+  };
+}
+
+function genericArenaGameFileBlocks(userText = "") {
+  const title = requestedGameTitle(userText);
+  return [
+    {
+      path: "index.html",
+      content: `<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hud">
+      <div>
+        <p>TACTICAL GAME</p>
+        <h1>${title}</h1>
+      </div>
+      <div class="stats">
+        <span>Score <strong id="score">0</strong></span>
+        <span>HP <strong id="hp">100</strong></span>
+        <span>Wave <strong id="wave">1</strong></span>
+      </div>
+    </section>
+    <canvas id="game" width="960" height="540" aria-label="${title} game"></canvas>
+    <section class="controls">
+      <span>WASD / 矢印: 移動</span>
+      <span>クリック: ショット</span>
+      <span>R: リスタート</span>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
+`
+    },
+    {
+      path: "style.css",
+      content: `* {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #080b12;
+  --panel: rgba(255, 255, 255, 0.08);
+  --line: rgba(255, 255, 255, 0.16);
+  --text: #f5f7fb;
+  --muted: #aab2c5;
+  --accent: #46f0c2;
+  --danger: #ff5f6d;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(70, 240, 194, 0.22), transparent 30%),
+    radial-gradient(circle at 80% 0%, rgba(94, 132, 255, 0.22), transparent 34%),
+    var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.shell {
+  width: min(1120px, calc(100vw - 28px));
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  background: rgba(7, 10, 18, 0.78);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.46);
+  backdrop-filter: blur(24px);
+}
+
+.hud,
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.hud {
+  margin-bottom: 14px;
+}
+
+.hud p {
+  margin: 0 0 4px;
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.6rem, 4vw, 3.4rem);
+  letter-spacing: 0;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.stats span,
+.controls span {
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.stats strong {
+  color: var(--text);
+}
+
+canvas {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #101522;
+}
+
+.controls {
+  margin-top: 14px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .hud {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .stats {
+    justify-content: flex-start;
+  }
+}
+`
+    },
+    {
+      path: "app.js",
+      content: `const canvas = document.querySelector("#game");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.querySelector("#score");
+const hpEl = document.querySelector("#hp");
+const waveEl = document.querySelector("#wave");
+
+const keys = new Set();
+let pointer = { x: canvas.width / 2, y: canvas.height / 2 };
+let score = 0;
+let hp = 100;
+let wave = 1;
+let lastSpawn = 0;
+let ended = false;
+
+const player = {
+  x: canvas.width / 2,
+  y: canvas.height / 2,
+  r: 16,
+  speed: 4.8
+};
+
+const bullets = [];
+const enemies = [];
+const particles = [];
+
+function reset() {
+  score = 0;
+  hp = 100;
+  wave = 1;
+  ended = false;
+  player.x = canvas.width / 2;
+  player.y = canvas.height / 2;
+  bullets.length = 0;
+  enemies.length = 0;
+  particles.length = 0;
+  updateHud();
+}
+
+function updateHud() {
+  scoreEl.textContent = score;
+  hpEl.textContent = Math.max(0, Math.round(hp));
+  waveEl.textContent = wave;
+}
+
+function spawnEnemy() {
+  const side = Math.floor(Math.random() * 4);
+  const enemy = {
+    x: side === 0 ? -30 : side === 1 ? canvas.width + 30 : Math.random() * canvas.width,
+    y: side === 2 ? -30 : side === 3 ? canvas.height + 30 : Math.random() * canvas.height,
+    r: 14 + Math.random() * 10,
+    speed: 1.2 + wave * 0.16 + Math.random() * 0.8,
+    hp: 2 + Math.floor(wave / 2)
+  };
+  enemies.push(enemy);
+}
+
+function shoot(x, y) {
+  if (ended) return;
+  const dx = x - player.x;
+  const dy = y - player.y;
+  const length = Math.hypot(dx, dy) || 1;
+  bullets.push({
+    x: player.x,
+    y: player.y,
+    vx: (dx / length) * 9,
+    vy: (dy / length) * 9,
+    life: 70
+  });
+}
+
+function burst(x, y, color = "#46f0c2") {
+  for (let i = 0; i < 12; i += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 4;
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 28,
+      color
+    });
+  }
+}
+
+function movePlayer() {
+  let dx = 0;
+  let dy = 0;
+  if (keys.has("w") || keys.has("arrowup")) dy -= 1;
+  if (keys.has("s") || keys.has("arrowdown")) dy += 1;
+  if (keys.has("a") || keys.has("arrowleft")) dx -= 1;
+  if (keys.has("d") || keys.has("arrowright")) dx += 1;
+  const length = Math.hypot(dx, dy) || 1;
+  player.x = Math.min(canvas.width - player.r, Math.max(player.r, player.x + (dx / length) * player.speed));
+  player.y = Math.min(canvas.height - player.r, Math.max(player.r, player.y + (dy / length) * player.speed));
+}
+
+function update(time) {
+  if (!ended) {
+    movePlayer();
+    if (time - lastSpawn > Math.max(360, 1100 - wave * 70)) {
+      spawnEnemy();
+      lastSpawn = time;
+    }
+  }
+
+  for (const bullet of bullets) {
+    bullet.x += bullet.vx;
+    bullet.y += bullet.vy;
+    bullet.life -= 1;
+  }
+
+  for (const enemy of enemies) {
+    const dx = player.x - enemy.x;
+    const dy = player.y - enemy.y;
+    const length = Math.hypot(dx, dy) || 1;
+    enemy.x += (dx / length) * enemy.speed;
+    enemy.y += (dy / length) * enemy.speed;
+    if (!ended && Math.hypot(player.x - enemy.x, player.y - enemy.y) < player.r + enemy.r) {
+      hp -= 0.55;
+      burst(player.x, player.y, "#ff5f6d");
+      if (hp <= 0) ended = true;
+    }
+  }
+
+  for (const bullet of bullets) {
+    for (const enemy of enemies) {
+      if (Math.hypot(bullet.x - enemy.x, bullet.y - enemy.y) < enemy.r + 4) {
+        bullet.life = 0;
+        enemy.hp -= 1;
+        burst(enemy.x, enemy.y);
+        if (enemy.hp <= 0) {
+          enemy.dead = true;
+          score += 10;
+          if (score > 0 && score % 120 === 0) wave += 1;
+        }
+      }
+    }
+  }
+
+  for (const particle of particles) {
+    particle.x += particle.vx;
+    particle.y += particle.vy;
+    particle.life -= 1;
+  }
+
+  for (let i = bullets.length - 1; i >= 0; i -= 1) {
+    const bullet = bullets[i];
+    if (bullet.life <= 0 || bullet.x < -20 || bullet.x > canvas.width + 20 || bullet.y < -20 || bullet.y > canvas.height + 20) bullets.splice(i, 1);
+  }
+  for (let i = enemies.length - 1; i >= 0; i -= 1) {
+    if (enemies[i].dead) enemies.splice(i, 1);
+  }
+  for (let i = particles.length - 1; i >= 0; i -= 1) {
+    if (particles[i].life <= 0) particles.splice(i, 1);
+  }
+
+  updateHud();
+}
+
+function drawGrid() {
+  ctx.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < canvas.width; x += 48) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, canvas.height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < canvas.height; y += 48) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvas.width, y);
+    ctx.stroke();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createRadialGradient(player.x, player.y, 20, player.x, player.y, 420);
+  gradient.addColorStop(0, "rgba(70,240,194,0.18)");
+  gradient.addColorStop(1, "rgba(16,21,34,1)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  drawGrid();
+
+  ctx.strokeStyle = "#46f0c2";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(player.x, player.y);
+  const aim = Math.atan2(pointer.y - player.y, pointer.x - player.x);
+  ctx.lineTo(player.x + Math.cos(aim) * 28, player.y + Math.sin(aim) * 28);
+  ctx.stroke();
+
+  ctx.fillStyle = "#d7fff3";
+  for (const bullet of bullets) {
+    ctx.beginPath();
+    ctx.arc(bullet.x, bullet.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (const enemy of enemies) {
+    ctx.fillStyle = enemy.hp > 2 ? "#ffbd59" : "#ff5f6d";
+    ctx.beginPath();
+    ctx.arc(enemy.x, enemy.y, enemy.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (const particle of particles) {
+    ctx.globalAlpha = Math.max(0, particle.life / 28);
+    ctx.fillStyle = particle.color;
+    ctx.fillRect(particle.x, particle.y, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  if (ended) {
+    ctx.fillStyle = "rgba(0,0,0,0.58)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#f5f7fb";
+    ctx.textAlign = "center";
+    ctx.font = "700 44px system-ui";
+    ctx.fillText("Game Over", canvas.width / 2, canvas.height / 2 - 12);
+    ctx.font = "500 18px system-ui";
+    ctx.fillText("Rキーでリスタート", canvas.width / 2, canvas.height / 2 + 28);
+  }
+}
+
+function loop(time) {
+  update(time);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener("keydown", (event) => {
+  keys.add(event.key.toLowerCase());
+  if (event.key.toLowerCase() === "r") reset();
+});
+
+window.addEventListener("keyup", (event) => {
+  keys.delete(event.key.toLowerCase());
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  const rect = canvas.getBoundingClientRect();
+  pointer = {
+    x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+    y: ((event.clientY - rect.top) / rect.height) * canvas.height
+  };
+});
+
+canvas.addEventListener("pointerdown", () => shoot(pointer.x, pointer.y));
+
+reset();
+requestAnimationFrame(loop);
+`
+    }
+  ];
+}
+
+function genericInteractiveAppFileBlocks(userText = "") {
+  const clean = socialText(userText || "Nexaアプリ", 80).replace(/[。.!?]+$/, "");
+  const title = clean && clean.length <= 36 ? clean : "Nexa App";
+  return [
+    {
+      path: "index.html",
+      content: `<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexa App</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <section class="hero">
+      <p>Nexa Build</p>
+      <h1>${title}</h1>
+      <span>短い依頼から、すぐ開けるWebアプリを自動生成しました。</span>
+    </section>
+    <section class="panel">
+      <label>
+        アイデア
+        <textarea id="idea" rows="5">${title}</textarea>
+      </label>
+      <button id="create" type="button">カードを追加</button>
+    </section>
+    <section class="cards" id="cards" aria-live="polite"></section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
+`
+    },
+    {
+      path: "style.css",
+      content: `* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: linear-gradient(135deg, #f5f5f7, #e9f7ff);
+  color: #1d1d1f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.app {
+  width: min(980px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 56px 0;
+}
+
+.hero,
+.panel,
+.cards article {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.09);
+  backdrop-filter: blur(18px);
+}
+
+.hero {
+  padding: 38px;
+}
+
+.hero p {
+  margin: 0 0 10px;
+  color: #007aff;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: clamp(2.3rem, 7vw, 5.2rem);
+  line-height: 0.98;
+  letter-spacing: 0;
+}
+
+.hero span {
+  color: #606067;
+  font-size: 1.05rem;
+}
+
+.panel {
+  margin-top: 18px;
+  padding: 20px;
+  display: grid;
+  gap: 14px;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  color: #606067;
+  font-weight: 700;
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 16px;
+  padding: 14px;
+  color: #1d1d1f;
+  background: rgba(255, 255, 255, 0.78);
+  font: inherit;
+}
+
+button {
+  min-height: 46px;
+  border: 0;
+  border-radius: 999px;
+  color: white;
+  background: #007aff;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #0067d8;
+}
+
+.cards {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.cards article {
+  padding: 18px;
+  animation: pop 0.28s ease both;
+}
+
+.cards h2 {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+}
+
+.cards p {
+  margin: 0;
+  color: #606067;
+  line-height: 1.65;
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+`
+    },
+    {
+      path: "app.js",
+      content: `const idea = document.querySelector("#idea");
+const create = document.querySelector("#create");
+const cards = document.querySelector("#cards");
+
+function addCard(text) {
+  const article = document.createElement("article");
+  article.innerHTML = \`
+    <h2>Nexa Card</h2>
+    <p>\${text.replace(/[<>]/g, "")}</p>
+  \`;
+  cards.prepend(article);
+}
+
+create.addEventListener("click", () => {
+  const text = idea.value.trim() || "新しいアイデア";
+  addCard(text);
+});
+
+addCard(idea.value.trim());
+`
+    }
+  ];
+}
+
+function heuristicGeneratedFileBlocks(userText = "", options = {}) {
+  const text = String(userText || "");
+  const finalize = (blocks) => prefixGeneratedBlocks(blocks, options.directory || "");
+  if (is3DShooterRequest(text)) {
+    return finalize(generic3DShooterFileBlocks(text));
+  }
   if (/calculator/i.test(text) || includesAnyText(text, ["\u96fb\u5353"])) {
-    return [
+    return finalize([
       {
         path: "index.html",
         content: `<!DOCTYPE html>
@@ -7841,10 +10266,11 @@ keys.addEventListener("click", (event) => {
 });
 `
       }
-    ];
+    ]);
   }
 
-  if (isLandingPageRequest(text)) return premiumLandingFileBlocks(text);
+  if (isLandingPageRequest(text)) return finalize(premiumLandingFileBlocks(text));
+  if (isGenericCreateFallbackRequest(text) || options.forceCreate) return finalize(genericCreateFileBlocks(text));
 
   return [];
 }
@@ -7862,6 +10288,7 @@ async function writeGeneratedFileBlocks(project, blocks = []) {
     if (!relPath) throw new Error("workspace_file_required");
     if (isWorkspaceIgnored(path.basename(file), relPath)) throw new Error("workspace_file_ignored");
     if (!isTextFile(file)) throw new Error("workspace_text_file_required");
+    const operation = block.operation === "delete" ? "delete" : "write";
     const content = String(block.content ?? "");
     if (Buffer.byteLength(content, "utf8") > 1024 * 1024) throw new Error("workspace_file_too_large");
 
@@ -7875,6 +10302,22 @@ async function writeGeneratedFileBlocks(project, blocks = []) {
       exists = true;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
+    }
+
+    if (operation === "delete") {
+      if (!exists) throw new Error("workspace_delete_missing_file");
+      await unlink(file);
+      files.push({
+        path: relPath,
+        status: "deleted",
+        beforeHash: hashText(before),
+        afterHash: "",
+        beforeSize: Buffer.byteLength(before, "utf8"),
+        afterSize: 0,
+        changedLines: before.split("\n").length,
+        diff: compactDiff(before, "")
+      });
+      continue;
     }
 
     await mkdir(path.dirname(file), { recursive: true });
@@ -7904,11 +10347,219 @@ async function writeGeneratedFileBlocks(project, blocks = []) {
     stderr: "",
     timedOut: false,
     agents: [{ id: "directWrite", title: "Direct Write", status: "complete", output: files.map((item) => item.path).join(", ") }],
-    changes: files.map((item) => ({ path: item.path, status: item.status, changedLines: item.changedLines }))
+    changes: files.map((item) => ({
+      path: item.path,
+      status: item.status,
+      changedLines: item.changedLines,
+      beforeHash: item.beforeHash,
+      afterHash: item.afterHash,
+      beforeSize: item.beforeSize,
+      afterSize: item.afterSize,
+      diff: item.diff
+    }))
   });
   project.runs = project.runs.slice(-80);
   await saveProject(project);
   return { applied: true, files, project };
+}
+
+function mergeWriteResults(primary = {}, secondary = {}) {
+  const merged = new Map();
+  for (const file of [...(primary.files || []), ...(secondary.files || [])]) {
+    if (file?.path) merged.set(file.path, file);
+  }
+  return {
+    ...(primary || {}),
+    ...(secondary || {}),
+    applied: Boolean(primary.applied || secondary.applied),
+    files: [...merged.values()],
+    project: secondary.project || primary.project
+  };
+}
+
+function normalizeHtmlAssetRef(ref = "") {
+  const clean = String(ref || "").trim().replace(/\\/g, "/").split("#")[0].split("?")[0];
+  if (!clean || clean.startsWith("#")) return "";
+  if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(clean)) return "";
+  if (/^(?:data|blob|mailto|tel|javascript):/i.test(clean)) return "";
+  return clean.replace(/^\/+/, "");
+}
+
+function referencedWebAssetsFromHtml(html = "") {
+  const refs = [];
+  const linkRe = /<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  const scriptRe = /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  for (const match of html.matchAll(linkRe)) {
+    const ref = normalizeHtmlAssetRef(match[1]);
+    if (ref && /\.(css)$/i.test(ref)) refs.push(ref);
+  }
+  for (const match of html.matchAll(scriptRe)) {
+    const ref = normalizeHtmlAssetRef(match[1]);
+    if (ref && /\.(js|mjs)$/i.test(ref)) refs.push(ref);
+  }
+  return [...new Set(refs)];
+}
+
+async function missingReferencedWebAssets(project, result = {}) {
+  const missing = [];
+  const written = new Set((result.files || []).map((file) => String(file.path || "").replace(/\\/g, "/")));
+  for (const file of result.files || []) {
+    if (!/\.(html|htm)$/i.test(file.path || "")) continue;
+    const htmlPath = projectScopedWorkspacePath(project, file.path);
+    let html = "";
+    try {
+      html = await readFile(htmlPath, "utf8");
+    } catch {
+      continue;
+    }
+    const baseDir = path.posix.dirname(String(file.path || "").replace(/\\/g, "/"));
+    for (const ref of referencedWebAssetsFromHtml(html)) {
+      const rel = path.posix.normalize(baseDir === "." ? ref : path.posix.join(baseDir, ref));
+      if (!rel || rel.startsWith("../") || path.isAbsolute(rel)) continue;
+      const assetPath = projectScopedWorkspacePath(project, rel);
+      if (written.has(rel)) continue;
+      try {
+        const assetStat = await stat(assetPath);
+        if (assetStat.isFile()) continue;
+      } catch (error) {
+        if (error.code !== "ENOENT") continue;
+      }
+      missing.push(rel);
+    }
+  }
+  return [...new Set(missing)];
+}
+
+async function implementationRequirementGaps(project, userText = "", result = {}) {
+  const chunks = [];
+  for (const file of result.files || []) {
+    if (file.status === "deleted" || !isTextFile(file.path || "")) continue;
+    try {
+      chunks.push(await readFile(projectScopedWorkspacePath(project, file.path), "utf8"));
+    } catch {
+      // Missing files are handled by the referenced-asset verifier.
+    }
+  }
+  const code = chunks.join("\n").toLowerCase();
+  const request = String(userText || "").toLowerCase();
+  const checks = [
+    { requested: /localstorage|ローカル保存|ブラウザ保存/.test(request), met: /localstorage/.test(code), label: "localStorage persistence" },
+    { requested: /検索|search|絞り込/.test(request), met: /search|filter|検索/.test(code), label: "search/filter behavior" },
+    { requested: /削除|delete|remove/.test(request), met: /delete|remove|削除/.test(code), label: "delete behavior" },
+    { requested: /追加|create|add/.test(request), met: /add|create|submit|追加/.test(code), label: "create/add behavior" },
+    { requested: /テスト|test/.test(request), met: /\btest\b|describe\s*\(|it\s*\(/.test(code), label: "tests" }
+  ];
+  return checks.filter((check) => check.requested && !check.met).map((check) => check.label);
+}
+
+function fallbackCssBlock(relPath = "style.css") {
+  return {
+    path: relPath,
+    content: `* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(76, 132, 255, 0.22), transparent 32%),
+    radial-gradient(circle at 80% 0%, rgba(60, 220, 170, 0.18), transparent 30%),
+    #0b0d12;
+  color: #f7f8fb;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.hero,
+main {
+  width: min(960px, calc(100vw - 32px));
+  padding: clamp(32px, 7vw, 76px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(22px);
+}
+
+h1 {
+  margin: 0 0 14px;
+  font-size: clamp(2.5rem, 8vw, 6rem);
+  line-height: 0.96;
+  letter-spacing: 0;
+}
+
+p {
+  color: rgba(247, 248, 251, 0.78);
+  font-size: 1.08rem;
+}
+
+button,
+.neon-button {
+  min-height: 48px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 999px;
+  color: #071016;
+  background: linear-gradient(135deg, #6df5ca, #77a7ff);
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 180ms ease, filter 180ms ease;
+}
+
+button:hover,
+.neon-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+}
+`
+  };
+}
+
+function fallbackJsBlock(relPath = "app.js") {
+  return {
+    path: relPath,
+    content: `const startButton = document.querySelector("button");
+
+if (startButton) {
+  startButton.addEventListener("click", () => {
+    startButton.textContent = "Nexa Ready";
+    document.body.classList.toggle("is-active");
+  });
+}
+`
+  };
+}
+
+function fallbackBlocksForMissingAssets(missing = []) {
+  return missing
+    .map((relPath) => {
+      if (/\.css$/i.test(relPath)) return fallbackCssBlock(relPath);
+      if (/\.(js|mjs)$/i.test(relPath)) return fallbackJsBlock(relPath);
+      return null;
+    })
+    .filter(Boolean);
+}
+
+async function maybeCompleteReferencedWebAssets(project, userText, result, options = {}) {
+  const missing = await missingReferencedWebAssets(project, result);
+  if (!missing.length) return { result, completed: false, missing: [] };
+  emitProcessEvent(options, processEvent(
+    "thinking",
+    "Nexaが不足ファイルを補完",
+    `${missing.join(", ")} を追加して、参照切れを防ぎます。`
+  ));
+  const blocks = isGameFallbackRequest(userText)
+    ? genericArenaGameFileBlocks(userText)
+    : fallbackBlocksForMissingAssets(missing);
+  if (!blocks.length) return { result, completed: false, missing };
+  const completed = await writeGeneratedFileBlocks(project, blocks);
+  return {
+    result: isGameFallbackRequest(userText) ? completed : mergeWriteResults(result, completed),
+    completed: true,
+    missing
+  };
 }
 
 function appliedPatchSummary(result) {
@@ -7931,12 +10582,12 @@ function codeWriteProcessSummary(project, method, result, error = "") {
     "作業過程",
     `1. 作業フォルダーを確認: ${folderName}`,
     folderPath ? `   ${folderPath}` : "",
-    "2. Forgeがコード変更案を生成",
+    "2. Nexaが作成内容を組み立てる",
     `3. ${methodText}`,
-    error ? `4. 書き込み失敗: ${error}` : `4. 書き込み完了: ${files.length}件`,
+    error ? `4. 書き込み失敗: ${userVisibleWriteIssue(error)}` : `4. 書き込み完了: ${files.length}件`,
     "",
     error ? "結果" : "書き込み結果",
-    error || files.map((file) => `- ${file.status}: ${file.path}`).join("\n")
+    error ? userVisibleWriteIssue(error) : files.map((file) => `- ${file.status}: ${file.path}`).join("\n")
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -7945,6 +10596,15 @@ async function verifyWrittenFilesSummary(project, files = []) {
   if (!files.length) return "";
   const lines = ["検証"];
   for (const file of files) {
+    if (file.status === "deleted") {
+      try {
+        await stat(projectScopedWorkspacePath(project, file.path));
+        lines.push(`- ${file.path}: 削除未完了`);
+      } catch (error) {
+        lines.push(`- ${file.path}: ${error.code === "ENOENT" ? "削除OK" : `検証失敗 (${error.message})`}`);
+      }
+      continue;
+    }
     try {
       const filePath = projectScopedWorkspacePath(project, file.path);
       const fileStat = await stat(filePath);
@@ -7978,13 +10638,18 @@ async function verifyWrittenFilesSummary(project, files = []) {
 }
 
 async function maybeUpgradeLandingQuality(project, userText, result, options = {}) {
+  // Later turns must keep the latest distinct implementation instead of
+  // replacing modified files with the same generic landing-page fallback.
+  if ((result?.files || []).some((file) => file.status !== "added")) {
+    return { result, upgraded: false };
+  }
   if (!(await needsLandingQualityUpgrade(project, userText, result?.files || []))) {
     return { result, upgraded: false };
   }
   emitProcessEvent(options, processEvent(
     "thinking",
-    "PrismがUI品質を検査",
-    "LPとしての見た目が弱いため、Forgeがプレミアム構成へ自動補修します。"
+    "NexaがUI品質を検査",
+    "LPとしての見た目が弱いため、Nexaがプレミアム構成へ自動補修します。"
   ));
   const upgraded = await writeGeneratedFileBlocks(project, premiumLandingFileBlocks(userText));
   return { result: upgraded, upgraded: true };
@@ -7994,31 +10659,134 @@ async function materializeCoderOutput(project, route, model, userText, context, 
   let finalCoderOutput = cleanCoderOutput(coderOutput);
   let lastError = "";
   let repaired = false;
+  let accumulatedWriteResult = { applied: false, files: [], project };
+  let workspaceWasEmpty = true;
   if (project?.workspaceReady) {
     emitProcessEvent(options, processEvent("thinking", "作業フォルダーを確認", project.selectedFolderName || folderNameFromWorkspace(project.workspaceRoot || "") || project.name || "workspace", {
       folderPath: project.workspaceRoot || project.selectedFolderPath || ""
     }));
+    const folderSummary = await workspaceDevelopmentLogSummary(project);
+    workspaceWasEmpty = Boolean(folderSummary.empty);
+    emitProcessEvent(options, processEvent("thinking", folderSummary.title, folderSummary.detail, {
+      empty: folderSummary.empty,
+      fileCount: folderSummary.fileCount,
+      dirCount: folderSummary.dirCount,
+      sample: folderSummary.sample
+    }));
   }
-  emitProcessEvent(options, processEvent("thinking", "Forgeがコード変更案を生成", "ファイルブロックまたは差分を検証しています。"));
+  emitProcessEvent(options, processEvent("thinking", "作成する構成を決定", describeBuildTarget(userText, route)));
+  emitProcessEvent(options, processEvent("thinking", "保存できる形式を準備", "実ファイルとして書き込めるパスと内容に整えています。"));
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const fileBlocks = project.workspaceReady ? extractGeneratedFileBlocks(finalCoderOutput) : [];
+  for (let attempt = 0; attempt < (AI_CODE_GENERATION_ONLY ? 4 : 2); attempt += 1) {
+    let fileBlocks = project.workspaceReady ? extractGeneratedFileBlocks(finalCoderOutput) : [];
+    if (!AI_CODE_GENERATION_ONLY && options.forceFreshRebuild && attempt === 0) {
+      const fresh = fallbackBlocksForWeakGeneratedBlocks(userText, []);
+      if (fresh.blocks.length) {
+        fileBlocks = fresh.blocks;
+        repaired = true;
+        emitProcessEvent(options, processEvent("thinking", "退避後の新しい構成を生成", fresh.reason, {
+          files: fresh.blocks.map((block) => ({ path: block.path }))
+        }));
+      }
+    }
+    const fallback = AI_CODE_GENERATION_ONLY ? { blocks: [], reason: "" } : fallbackBlocksForWeakGeneratedBlocks(userText, fileBlocks);
+    if (!AI_CODE_GENERATION_ONLY && fallback.blocks.length) {
+      emitProcessEvent(options, processEvent("thinking", "短い依頼の意図を補正", fallback.reason, {
+        files: fallback.blocks.map((block) => ({ path: block.path }))
+      }));
+      fileBlocks = fallback.blocks;
+      repaired = true;
+    }
     const patch = project.workspaceReady && !fileBlocks.length ? extractUnifiedPatch(finalCoderOutput) : "";
 
     if (fileBlocks.length) {
       try {
+        emitProcessEvent(options, processEvent("thinking", "保存前にファイル候補を確認", `${fileBlocks.length}件のファイル候補を検証しています。`, {
+          files: fileBlocks.map((block) => ({ path: block.path }))
+        }));
         let writeResult = await writeGeneratedFileBlocks(project, fileBlocks);
-        const quality = await maybeUpgradeLandingQuality(project, userText, writeResult, options);
+        accumulatedWriteResult = mergeWriteResults(accumulatedWriteResult, writeResult);
+        if (AI_CODE_GENERATION_ONLY) {
+          const missing = await missingReferencedWebAssets(project, accumulatedWriteResult);
+          if (missing.length) {
+            lastError = `missing_referenced_files:${missing.join(",")}`;
+            emitProcessEvent(options, processEvent(
+              "thinking",
+              "実装AIが不足ファイルを検出",
+              `${missing.join(", ")} が参照されていますが未生成です。固定補完を使わずAIへ追加実装を依頼します。`,
+              { missing }
+            ));
+            if (model && attempt < 3) {
+              const retry = cleanCoderOutput(await strictCoderRepairCall(
+                model,
+                userText,
+                context,
+                finalCoderOutput,
+                `${lastError}. Output complete fenced file blocks for every missing referenced file. Preserve the already-written files and implement the requested behavior; do not emit placeholders.`,
+                {
+                  signal: options.signal,
+                  fallbackModel: options.fallbackModel,
+                  onFallback: options.onFallback
+                }
+              ));
+              if (retry && !retry.startsWith("fallback:") && retry !== finalCoderOutput) {
+                finalCoderOutput = retry;
+                repaired = true;
+                continue;
+              }
+            }
+            throw new Error(lastError);
+          }
+          const requirementGaps = await implementationRequirementGaps(project, userText, accumulatedWriteResult);
+          if (requirementGaps.length) {
+            lastError = `missing_required_behavior:${requirementGaps.join(",")}`;
+            emitProcessEvent(options, processEvent(
+              "thinking",
+              "検証AIが未実装要件を検出",
+              `${requirementGaps.join(", ")} が不足しています。AIへ実装の追加を戻します。`,
+              { requirementGaps }
+            ));
+            if (model && attempt < 3) {
+              const retry = cleanCoderOutput(await strictCoderRepairCall(
+                model,
+                userText,
+                context,
+                finalCoderOutput,
+                `${lastError}. Emit valid file blocks or a unified diff that implements every missing behavior in the existing generated files.`,
+                {
+                  signal: options.signal,
+                  fallbackModel: options.fallbackModel,
+                  onFallback: options.onFallback
+                }
+              ));
+              if (retry && !retry.startsWith("fallback:") && retry !== finalCoderOutput) {
+                finalCoderOutput = retry;
+                repaired = true;
+                continue;
+              }
+            }
+            throw new Error(lastError);
+          }
+          writeResult = accumulatedWriteResult;
+        }
+        const quality = AI_CODE_GENERATION_ONLY ? { result: writeResult, upgraded: false } : await maybeUpgradeLandingQuality(project, userText, writeResult, options);
         writeResult = quality.result;
+        const completion = AI_CODE_GENERATION_ONLY ? { result: writeResult, completed: false, missing: [] } : await maybeCompleteReferencedWebAssets(project, userText, writeResult, options);
+        writeResult = completion.result;
         if (writeResult.project?.runs) project.runs = writeResult.project.runs;
-        const verification = await verifyWrittenFilesSummary(project, writeResult.files);
-        for (const event of codeProcessSuccessEvents(project, "file-block", writeResult, verification, repaired, false).slice(2)) {
+        for (const event of codeProcessFileEvents(writeResult, userText)) {
           emitProcessEvent(options, event);
         }
+        const verification = await verifyWrittenFilesSummary(project, writeResult.files);
+        const postWriteChecks = await runPostWriteChecksForFiles(project, writeResult.files, options);
+        const checkSummary = postWriteChecksSummary(postWriteChecks);
+        emitProcessEvent(options, codeProcessFinishEvent(writeResult, verification, checkSummary));
         return [
           codeWriteProcessSummary(project, "file-block", writeResult),
           verification,
+          checkSummary,
           quality.upgraded ? "品質補修: LPとしての完成度が低かったため、ネオンUI向けのHTML/CSS/JS構成へ自動アップグレードしました。" : "",
+          completion.completed ? `不足ファイル補完: ${completion.missing.join(", ")} を追加しました。` : "",
           repaired ? "再生成: 1回目の出力が保存形式として不安定だったため、厳格フォーマットで作り直しました。" : ""
         ].filter(Boolean).join("\n\n");
       } catch (error) {
@@ -8026,18 +10794,26 @@ async function materializeCoderOutput(project, route, model, userText, context, 
       }
     } else if (patch) {
       try {
+        emitProcessEvent(options, processEvent("thinking", "差分を確認", "既存ファイルへ適用できる変更差分として検証しています。"));
         let patchResult = await workspacePatch({ projectId: project.id, patch, dryRun: false });
-        const quality = await maybeUpgradeLandingQuality(project, userText, patchResult, options);
+        const quality = AI_CODE_GENERATION_ONLY ? { result: patchResult, upgraded: false } : await maybeUpgradeLandingQuality(project, userText, patchResult, options);
         patchResult = quality.result;
+        const completion = AI_CODE_GENERATION_ONLY ? { result: patchResult, completed: false, missing: [] } : await maybeCompleteReferencedWebAssets(project, userText, patchResult, options);
+        patchResult = completion.result;
         if (patchResult.project?.runs) project.runs = patchResult.project.runs;
-        const verification = await verifyWrittenFilesSummary(project, patchResult.files);
-        for (const event of codeProcessSuccessEvents(project, "patch", patchResult, verification, repaired, false).slice(2)) {
+        for (const event of codeProcessFileEvents(patchResult, userText)) {
           emitProcessEvent(options, event);
         }
+        const verification = await verifyWrittenFilesSummary(project, patchResult.files);
+        const postWriteChecks = await runPostWriteChecksForFiles(project, patchResult.files, options);
+        const checkSummary = postWriteChecksSummary(postWriteChecks);
+        emitProcessEvent(options, codeProcessFinishEvent(patchResult, verification, checkSummary));
         return [
           codeWriteProcessSummary(project, "patch", patchResult),
           verification,
+          checkSummary,
           quality.upgraded ? "品質補修: LPとしての完成度が低かったため、ネオンUI向けのHTML/CSS/JS構成へ自動アップグレードしました。" : "",
+          completion.completed ? `不足ファイル補完: ${completion.missing.join(", ")} を追加しました。` : "",
           repaired ? "再生成: 1回目の出力が保存形式として不安定だったため、厳格フォーマットで作り直しました。" : "",
           finalCoderOutput
         ].filter(Boolean).join("\n\n");
@@ -8046,10 +10822,11 @@ async function materializeCoderOutput(project, route, model, userText, context, 
       }
     } else {
       lastError = "writable_file_block_or_valid_diff_not_found";
+      emitProcessEvent(options, processEvent("thinking", "保存前チェックで問題を検出", "そのままではファイルへ保存できない出力だったため、補修ルートに切り替えます。"));
     }
 
-    if (attempt === 0 && model) {
-      emitProcessEvent(options, processEvent("thinking", "出力を自動補修", lastError || "書き込み形式を修正しています。"));
+    if (attempt < (AI_CODE_GENERATION_ONLY ? 3 : 1) && model) {
+      emitProcessEvent(options, processEvent("thinking", `実装AIが出力を再生成 (${attempt + 2}/4)`, userVisibleWriteIssue(lastError || "書き込み形式を修正しています。")));
       const retry = cleanCoderOutput(await strictCoderRepairCall(model, userText, context, finalCoderOutput, lastError, {
         signal: options.signal,
         fallbackModel: options.fallbackModel,
@@ -8064,19 +10841,31 @@ async function materializeCoderOutput(project, route, model, userText, context, 
     break;
   }
 
-  if (project.workspaceReady && route.needsCode) {
-    const heuristicBlocks = heuristicGeneratedFileBlocks(userText);
+  const requestsNewArtifact = isGenericCreateFallbackRequest(userText) || route.intent?.taskKind === "code_create";
+  const canUseWorkspaceFallback = workspaceWasEmpty || requestsNewArtifact;
+  if (!AI_CODE_GENERATION_ONLY && project.workspaceReady && route.needsCode && canUseWorkspaceFallback) {
+    const heuristicBlocks = heuristicGeneratedFileBlocks(userText, { directory: "", forceCreate: requestsNewArtifact });
     if (heuristicBlocks.length) {
       try {
-        const writeResult = await writeGeneratedFileBlocks(project, heuristicBlocks);
+        emitProcessEvent(options, processEvent("thinking", "標準構成で作り直す", `${heuristicBlocks.length}件の実ファイルとして作成します。`, {
+          files: heuristicBlocks.map((block) => ({ path: block.path }))
+        }));
+        let writeResult = await writeGeneratedFileBlocks(project, heuristicBlocks);
+        const completion = await maybeCompleteReferencedWebAssets(project, userText, writeResult, options);
+        writeResult = completion.result;
         if (writeResult.project?.runs) project.runs = writeResult.project.runs;
-        const verification = await verifyWrittenFilesSummary(project, writeResult.files);
-        for (const event of codeProcessSuccessEvents(project, "heuristic-file-block", writeResult, verification, repaired, true).slice(2)) {
+        for (const event of codeProcessFileEvents(writeResult, userText)) {
           emitProcessEvent(options, event);
         }
+        const verification = await verifyWrittenFilesSummary(project, writeResult.files);
+        const postWriteChecks = await runPostWriteChecksForFiles(project, writeResult.files, options);
+        const checkSummary = postWriteChecksSummary(postWriteChecks);
+        emitProcessEvent(options, codeProcessFinishEvent(writeResult, verification, checkSummary));
         return [
           codeWriteProcessSummary(project, "file-block", writeResult),
           verification,
+          checkSummary,
+          completion.completed ? `不足ファイル補完: ${completion.missing.join(", ")} を追加しました。` : "",
           "自動補完: モデル出力が保存形式として不安定だったため、依頼内容に合う標準構成を生成しました。"
         ].filter(Boolean).join("\n\n");
       } catch (error) {
@@ -8089,12 +10878,20 @@ async function materializeCoderOutput(project, route, model, userText, context, 
     return `${finalCoderOutput}\n\nファイルへ直接書き込むには、先に作業フォルダーを選択してください。`;
   }
   if (project.workspaceReady && route.needsCode) {
+    if (AI_CODE_GENERATION_ONLY && options.workspaceRebuild) {
+      const restored = await restoreStagedWorkspace(project, options.workspaceRebuild);
+      if (restored.length) {
+        emitProcessEvent(options, processEvent("done", "生成失敗のため元ファイルを復元", `${restored.length}件をバックアップから戻しました。`, { restored }));
+      }
+    }
     for (const event of codeProcessFailureEvents(project, lastError || "writable_file_block_or_valid_diff_not_found").slice(2)) {
       emitProcessEvent(options, event);
     }
     return [
       codeWriteProcessSummary(project, "file-block", { files: [] }, lastError || "writable_file_block_or_valid_diff_not_found"),
-      "保存できるfileブロックまたは有効なdiffが見つからなかったため、ファイル保存は行いませんでした。",
+      AI_CODE_GENERATION_ONLY
+        ? "実装AIが有効なファイルまたは差分を生成できなかったため、固定テンプレートへ置き換えず停止しました。モデルを起動して再実行してください。"
+        : "保存できるfileブロックまたは有効なdiffが見つからなかったため、ファイル保存は行いませんでした。",
       "内部メモは最終回答に混ぜず、開発ログだけに記録しました。"
     ].join("\n\n");
   }
@@ -8102,7 +10899,7 @@ async function materializeCoderOutput(project, route, model, userText, context, 
 }
 
 function sanitizeUserVisibleAssistantText(text = "") {
-  let output = stripThinking(String(text || "")).trim();
+  let output = sanitizeNexaVisibleText(stripThinking(String(text || "")).trim());
   const internalMarkers = [
     "\nWe are creating ",
     "\nSince the user wants ",
@@ -8119,16 +10916,16 @@ function sanitizeUserVisibleAssistantText(text = "") {
       break;
     }
   }
-  return output;
+  return sanitizeNexaVisibleText(output);
 }
 
 function agentItem(id, output, model = "local-rules", limit = 1200) {
-  const name = agentBrandName(id) || COMPANY_AGENT_ORDER.find(([agentId]) => agentId === id)?.[1] || id;
+  const name = agentBrandName(id);
   return {
     id,
     name,
-    model,
-    output: clip(output, limit),
+    model: publicModelName(model),
+    output: sanitizeNexaVisibleText(clip(output, limit)),
     error: ""
   };
 }
@@ -8188,19 +10985,19 @@ function localResponseQuality(project, userText, finalText, route = {}) {
     score -= 12;
     reasons.push("self_improvement_not_addressed");
   }
-  if (asksChatGptLevel && !/ChatGPT|GPT|意図|推論|記憶|自己評価|品質|改善|修正|実装|レベル|Lv/i.test(answer)) {
+  if (asksChatGptLevel && !/Nexa|意図|推論|記憶|自己評価|品質|改善|修正|実装|レベル|Lv/i.test(answer)) {
     score -= 18;
-    reasons.push("chatgpt_level_request_not_addressed");
+    reasons.push("high_quality_request_not_addressed");
   }
-  if ((route.intent?.selfImprovement || asksChatGptLevel) && !/Answer blueprint|回答設計|品質ゲート|Vela|再生成|補正|自己評価/i.test(answer)) {
+  if ((route.intent?.selfImprovement || asksChatGptLevel) && !/Answer blueprint|回答設計|品質ゲート|Nexa|再生成|補正|自己評価/i.test(answer)) {
     score -= 10;
     reasons.push("missing_quality_workflow_evidence");
   }
-  if ((route.intent?.selfImprovement || asksChatGptLevel) && !/ローカルモデル|Ollama|モデル自体|ChatGPTそのものではない|同等ではない|外部API/i.test(answer)) {
+  if ((route.intent?.selfImprovement || asksChatGptLevel) && !/ローカルモデル|Ollama|モデル自体|同等ではない|外部API|制約/i.test(answer)) {
     score -= 8;
     reasons.push("missing_honest_model_limit");
   }
-  if (asksChatGptLevel && /同等|同じ|完全再現|完全にChatGPT|ChatGPTそのもの|equals|same as/i.test(answer) && !/同等ではない|そのものではない|断言しない|設計上|ワークフロー|モデル自体/i.test(answer)) {
+  if (asksChatGptLevel && /同等|同じ|完全再現|equals|same as/i.test(answer) && !/同等ではない|断言しない|設計上|ワークフロー|モデル自体/i.test(answer)) {
     score -= 16;
     reasons.push("chatgpt_parity_overclaim");
   }
@@ -8240,8 +11037,8 @@ function localResponseQuality(project, userText, finalText, route = {}) {
       continuationUsed: !route.intent?.continuationHint || !/何を続け|どの続き|情報を教えてください/.test(answer),
       codeSignal: !route.needsCode || /作業過程|書き込み|変更|modified|created|updated|```|file path=|diff --git/i.test(answer),
       selfImprovementSignal: !route.intent?.selfImprovement || /level|lv|賢|自己評価|品質|改善|修正|実装/i.test(answer),
-      qualityWorkflowSignal: !(route.intent?.selfImprovement || asksChatGptLevel) || /Answer blueprint|回答設計|品質ゲート|Vela|再生成|補正|自己評価/i.test(answer),
-      chatGptLevelSignal: !asksChatGptLevel || /ChatGPT|GPT|意図|推論|記憶|自己評価|品質|改善|修正|実装|レベル|Lv/i.test(answer)
+      qualityWorkflowSignal: !(route.intent?.selfImprovement || asksChatGptLevel) || /Answer blueprint|回答設計|品質ゲート|Nexa|再生成|補正|自己評価/i.test(answer),
+      chatGptLevelSignal: !asksChatGptLevel || /Nexa|意図|推論|記憶|自己評価|品質|改善|修正|実装|レベル|Lv/i.test(answer)
     }
   };
 }
@@ -8253,16 +11050,16 @@ async function reviseLowQualityResponse(model, userText, finalText, quality, com
       {
         role: "system",
         content: [
-          "You are Vela, the final quality gate for a Japanese local AI workspace.",
+          "You are Nexa, the final quality gate for a Japanese local AI workspace.",
           "Rewrite the assistant answer so it directly satisfies the latest user request.",
           "Do not ask questions unless truly blocked.",
           "Do not mention hidden chain-of-thought.",
           "Keep it concise, concrete, and in Japanese.",
           "If the user asked for smartness or levels, include before/after levels and what changed.",
-          "If the user asked for ChatGPT-level intelligence, frame the result as ChatGPT-style workflow improvements, not literal parity with ChatGPT.",
+          "If the user asked for very high intelligence, frame the result as Nexa workflow improvements, not literal parity with external products.",
           "Preserve concrete changed files, verification results, installer/version notes, and any honest remaining limitations from the current answer.",
           "Mention intent recovery, memory/context use, Answer blueprint, self-evaluation, and revision gate when relevant.",
-          "If the weak answer lacks honest model limits, add that local Ollama models are not literally ChatGPT and external APIs are needed for real ChatGPT-class model access.",
+          "If the weak answer lacks honest model limits, add that local Ollama models have limits and external APIs are needed for higher-quality cloud model access.",
           IMAGE_GENERATION_ONLY ? "If the request is about video generation, say video generation is disabled in this build and offer image generation/storyboard alternatives; never claim a video was generated." : ""
         ].join(" ")
       },
@@ -8291,12 +11088,37 @@ async function reviseLowQualityResponse(model, userText, finalText, quality, com
   }
 }
 
+function keywordSpecialistAgent(intent = {}, userText = "") {
+  const kind = String(intent.taskKind || "chat");
+  const labels = {
+    code_create: "実装専門",
+    code_modify: "デバッグ専門",
+    research: "Web調査専門",
+    image_generation: "画像専門",
+    video_generation: "動画専門",
+    folder_overview: "ファイル解析専門",
+    code_capability: "開発設計専門",
+    self_improvement: "AI改善専門",
+    explain: "解説専門",
+    continue: "継続作業専門"
+  };
+  if (kind === "chat") return null;
+  const label = labels[kind] || `${kind}専門`;
+  return {
+    id: `keyword:${kind}`,
+    name: `Nexa ${label}`,
+    model: "intent-specialist-router",
+    output: `キーワードと意図を ${kind} と判定し、${label}AIを実行チームへ追加しました。対象: ${clip(userText, 180)}`,
+    error: ""
+  };
+}
+
 async function runCompanyAgents(project, userText, history, system, send, attachments = [], options = {}) {
   const reasoning = reasoningOptions(options.reasoningLevel);
-  const baseRoute = routeCompanyWork(userText);
-  const intent = analyzeUserIntent(userText, project);
+  const baseRoute = options.pipeline?.route || routeCompanyWork(userText);
+  let intent = options.pipeline?.intent || analyzeUserIntent(userText, project);
   const activeReasoning = intent.chatGptLevel ? reasoningOptions("very-high") : reasoning;
-  const route = {
+  let route = {
     ...baseRoute,
     needsCode: baseRoute.needsCode || intent.needsCode,
     needsResearch: baseRoute.needsResearch || intent.needsResearch,
@@ -8304,6 +11126,10 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     isComplex: baseRoute.isComplex || intent.isTerse || intent.selfImprovement || activeReasoning.complexityBoost || Boolean(options.planMode),
     intent
   };
+  route = options.pipeline?.route
+    ? { ...route, ...options.pipeline.route, intent }
+    : applyProjectModeToRoute(project, route, userText);
+  intent = route.intent || intent;
   const selectedModel = resolveRequestedModel(system, options.modelChoice, route.needsCode ? "code" : "conversation");
   const localFastModel = localFallbackForKind(system, "fast");
   const localSmartModel = localFallbackForKind(system, "conversation");
@@ -8334,6 +11160,7 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     chatGptContract,
     answerBlueprint,
     `Intent profile:\n${formatIntentProfile(intent)}`,
+    options.pipeline ? `Nexa 3.0 execution plan:\n${JSON.stringify(pipelineSummary(options.pipeline), null, 2)}` : "",
     `Deep reasoning profile:\n${JSON.stringify(deepProfile, null, 2)}`,
     `User request:\n${userText}`,
     `Media policy:\n${IMAGE_GENERATION_ONLY ? "Image generation only. Video generation is intentionally disabled; never claim a video was created." : "Image and video generation may be available."}`,
@@ -8344,6 +11171,8 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     `Relevant memory:\n${relevantMemory}`,
     `Attachments:\n${formatAttachments(attachments)}`
   ].join("\n\n");
+  const requestedFilesForLog = expectedFilesTextForLog(userText, route);
+  const buildTargetForLog = describeBuildTarget(userText, route);
   const agents = [];
   const emitStep = (type, title, detail = "", data = {}) => {
     emitProcessEvent(options, processEvent(type, title, detail, data));
@@ -8354,11 +11183,13 @@ async function runCompanyAgents(project, userText, history, system, send, attach
       id: item.id,
       name: item.name,
       title: item.name,
-      model: item.model,
+      model: publicModelName(item.model),
       status: "complete",
       output: item.output
     });
   };
+  const keywordAgent = keywordSpecialistAgent(intent, userText);
+  if (keywordAgent) emit(keywordAgent);
   const llmOptions = (fallbackModel = "", extra = {}) => ({
     ...extra,
     fallbackModel,
@@ -8368,25 +11199,38 @@ async function runCompanyAgents(project, userText, history, system, send, attach
       emitStep(
         "thinking",
         "クラウドからローカルへ退避",
-        `${failedModel} が使えなかったため、${nextModel} で続行します。`,
-        { failedModel, fallbackModel: nextModel, error: error.message }
+        `${publicModelName(failedModel)} が使えなかったため、${publicModelName(nextModel)} で続行します。`,
+        { failedModel: publicModelName(failedModel), fallbackModel: publicModelName(nextModel), error: error.message }
       );
     }
   });
 
-  emitStep("thinking", "意図を復元", `${intent.taskKind} / ${deepProfile.label}`, {
+  emitStep("thinking", "依頼内容を具体化", `「${clip(userText, 80)}」から、${buildTargetForLog}`, {
     intent: intent.taskKind,
     deep: deepProfile.enabled
   });
+  emitStep("thinking", "モードを確認", `${route.modeLabel}: ${
+    route.mode === "chat"
+      ? "コード保存やPC操作は行わず、会話・文章・生成結果を優先します。"
+      : route.mode === "code"
+      ? "選択フォルダー内の読み書き・検証を優先します。"
+      : route.mode === "both"
+      ? "会話を基本に、コード作業が必要な時だけ開発ルートを使います。"
+      : "送信前にモード選択が必要です。"
+  }`, { mode: route.mode || "" });
   if (chatGptContract) {
     emitStep(
       "thinking",
-      "ChatGPT級の品質基準を適用",
-      "短い依頼の意図復元、記憶利用、自己評価、弱い回答の補正を強めます。",
+      "作業基準を固定",
+      route.needsCode
+        ? "短い依頼でも、実ファイル作成・直接保存・最後の確認まで行う基準で進めます。"
+        : "短い依頼でも、古い文脈へ流れず最新依頼を優先する基準で進めます。",
       { chatGptLevel: Boolean(intent.chatGptLevel), selfImprovement: Boolean(intent.selfImprovement) }
     );
   }
-  emitStep("thinking", "回答設計を作成", "最終回答に含める要素と避ける表現を固定します。", {
+  emitStep("thinking", "最終出力の形を決める", route.needsCode
+    ? "開発ログは途中経過に流し、最後は保存結果・検証結果・変更ファイルに絞ります。"
+    : "質問を最終回答に混ぜず、必要な場合は選択肢として出せる形にします。", {
     blueprint: Boolean(answerBlueprint)
   });
   emitStep("thinking", "関連記憶を検索", relevantMemory === "No strongly relevant memory yet." ? "強く関連する記憶はまだありません。" : clip(relevantMemory, 220));
@@ -8396,14 +11240,14 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     `Intent profile: ${intent.taskKind}. ${intent.inferredGoal}`,
     intent.isTerse ? "The user wrote a short prompt; infer from project state and recent memory before asking." : "The request has enough explicit detail to proceed.",
     intent.selfImprovement ? "Treat this as a concrete app self-improvement task, not a generic explanation about intelligence." : "",
-    intent.chatGptLevel ? "Apply the ChatGPT-grade response contract, but do not claim literal ChatGPT parity." : "",
+    intent.chatGptLevel ? "Apply the Nexa quality response contract, but do not claim literal external-model parity." : "",
     intent.videoUnsupported ? "Video generation is disabled. Offer image generation, storyboard frames, or prompt design instead of pretending to generate a video." : "",
     "Follow the answer quality contract exactly.",
     "Use the answer blueprint as the final-answer checklist.",
     options.planMode ? "Plan mode is enabled; produce an explicit plan before execution details." : "Agent mode can proceed directly when safe.",
-    route.needsCode ? "Route to Forge." : "Forge can stay in standby.",
-    route.needsResearch ? "Route to Quanta with no live web claim." : "Quanta can stay in standby.",
-    deepProfile.enabled ? "Use Opus-style deep pass with Sage, Mira, Prism, Proof, and Vela." : "Keep reasoning minimal."
+    route.needsCode ? "Route to Nexa implementation." : "Nexa implementation can stay in standby.",
+    route.needsResearch ? "Route to Nexa research with no live web claim." : "Nexa research can stay in standby.",
+    deepProfile.enabled ? "Use Nexa deep pass." : "Keep reasoning minimal."
   ].join(" ")));
 
   emit(agentItem("planner", route.isComplex
@@ -8412,19 +11256,23 @@ async function runCompanyAgents(project, userText, history, system, send, attach
 
   emit(agentItem("memory", projectMemoryText(project)));
 
-  emitStep("thinking", "AIチームを編成", deepProfile.enabled ? "Astra / Lattice / Sage / Mira / Forge / Prism / Proof / Vela" : "Astra / Lattice / Forge / Proof / Vela");
+  emitStep("thinking", "使う処理ルートを選択", route.needsCode
+    ? `コード作成ルートで進めます。想定ファイル: ${requestedFilesForLog}`
+    : "会話回答ルートで進めます。");
 
   emit(agentItem("toolRouter", project.workspaceReady
-    ? `Forge may write direct file blocks or valid patches inside: ${workspaceSelection}`
+    ? `Nexa may write direct file blocks or valid patches inside: ${workspaceSelection}`
     : "No workspace folder is selected yet; code can be drafted, but file writes should wait."));
 
   emitStep("thinking", "作業範囲を確認", project.workspaceReady ? workspaceSelection : "フォルダー未選択。必要な場合はコード作業前に選択します。");
 
   if (route.isComplex && fastModel) {
-    emitStep("thinking", "Helixが方針を検討", "要点を短く整理しています。");
+    emitStep("thinking", "作業方針を具体化", route.needsCode
+      ? `作る対象、保存先、検証方法を整理します。想定ファイル: ${requestedFilesForLog}`
+      : "回答に必要な論点、避ける表現、使う記憶を整理します。");
     const note = await compactAgentCall(
       fastModel,
-      "Helix",
+      "Nexa",
       "Analyze the request and produce the key reasoning points in 3 bullets or fewer.",
       context,
       llmOptions(localFastModel, { numPredict: Math.min(260, activeReasoning.numPredict), temperature: activeReasoning.temperature, signal: options.signal })
@@ -8435,10 +11283,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
   }
 
   if (deepProfile.enabled && fastModel) {
-    emitStep("thinking", "Sageが成功条件を設計", "目的、成功条件、リスクを整理しています。");
+    emitStep("thinking", "完了条件を決める", route.needsCode
+      ? "選択フォルダーにファイルが保存され、構造確認と構文確認が通る状態を完了条件にします。"
+      : "最新依頼に直接答え、不要な質問や内部ログを最終回答へ混ぜない状態を完了条件にします。");
     const strategy = await compactAgentCall(
       fastModel,
-      "Sage",
+      "Nexa",
       "Build a concise execution strategy: inferred goal, success criteria, risky assumptions, and what the final answer must contain. Do not answer the user.",
       context,
       llmOptions(localFastModel, { numPredict: Math.min(360, activeReasoning.numPredict), temperature: Math.min(0.25, activeReasoning.temperature), signal: options.signal })
@@ -8449,7 +11299,9 @@ async function runCompanyAgents(project, userText, history, system, send, attach
   }
 
   if (route.needsCode && codeModel) {
-    emitStep("thinking", "Forgeが実装案を生成", project.workspaceReady ? "選択フォルダーへ直接保存できる形式を優先します。" : "フォルダー未選択のため、保存可能な案を準備します。");
+    emitStep("thinking", "保存するコードを生成", project.workspaceReady
+      ? `選択フォルダーへ直接保存できる file ブロックまたは差分を作ります。想定ファイル: ${requestedFilesForLog}`
+      : `フォルダー未選択のため、保存可能なコード案だけ準備します。想定ファイル: ${requestedFilesForLog}`);
     const note = cleanCoderOutput(await coderAgentCall(codeModel, userText, context, llmOptions(localCodeModel || localSmartModel, { signal: options.signal })));
     emit(agentItem("coder", note, codeModel, 6000));
   } else {
@@ -8463,10 +11315,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
   }
 
   if (deepProfile.enabled && fastModel) {
-    emitStep("thinking", "Miraが別視点で確認", "抜け・過大表現・古い文脈へのズレを確認しています。");
+    emitStep("thinking", "依頼からズレていないか確認", route.needsCode
+      ? "作ろうとしているファイル構成が、ユーザーの短い依頼から外れていないか確認します。"
+      : "古い会話ではなく最新の依頼に沿っているか確認します。");
     const alternate = await compactAgentCall(
       fastModel,
-      "Mira",
+      "Nexa",
       "Give a concise second opinion: what might be wrong, missing, or overclaimed in the current plan. Focus on the latest user request.",
       `${context}\n\nCurrent notes:\n${agents.map((agent) => `${agent.name}: ${clip(agent.output, 360)}`).join("\n")}`,
       llmOptions(localFastModel, { numPredict: Math.min(300, activeReasoning.numPredict), temperature: Math.min(0.22, activeReasoning.temperature), signal: options.signal })
@@ -8477,10 +11331,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
   }
 
   if ((route.isComplex || deepProfile.enabled) && fastModel) {
-    emitStep("thinking", "PrismとProofが検証", "曖昧さ、矛盾、実行可能性を確認しています。");
+    emitStep("thinking", "実行前の問題を探す", route.needsCode
+      ? "保存できないパス、空ファイル、プレースホルダー、依頼と違うファイル種類がないか確認します。"
+      : "曖昧さ、矛盾、過大表現、不要な質問が残っていないか確認します。");
     const criticNote = await compactAgentCall(
       fastModel,
-      "Prism",
+      "Nexa",
       "Check the plan for vagueness, wrong task drift, unnecessary questions, and missing implementation details. Return concise fix notes.",
       context,
       llmOptions(localFastModel, { numPredict: Math.min(260, activeReasoning.numPredict), temperature: Math.min(0.2, activeReasoning.temperature), signal: options.signal })
@@ -8488,9 +11344,9 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     emit(agentItem("critic", criticNote, fastModel));
     const verifierNote = await compactAgentCall(
       fastModel,
-      "Proof",
+      "Nexa",
       "Verify that the proposed response can satisfy the user's latest request. Prefer actionable defaults over asking questions.",
-      `${context}\n\nSage note:\n${agents.find((agent) => agent.id === "strategist")?.output || ""}\n\nMira note:\n${agents.find((agent) => agent.id === "secondOpinion")?.output || ""}\n\nForge note:\n${agents.find((agent) => agent.id === "coder")?.output || ""}`,
+      `${context}\n\nNexa strategy note:\n${agents.find((agent) => agent.id === "strategist")?.output || ""}\n\nNexa review note:\n${agents.find((agent) => agent.id === "secondOpinion")?.output || ""}\n\nNexa code note:\n${agents.find((agent) => agent.id === "coder")?.output || ""}`,
       llmOptions(localFastModel, { numPredict: Math.min(240, activeReasoning.numPredict), temperature: Math.min(0.18, activeReasoning.temperature), signal: options.signal })
     );
     emit(agentItem("verifier", verifierNote, fastModel));
@@ -8501,8 +11357,8 @@ async function runCompanyAgents(project, userText, history, system, send, attach
   const intelligence = intelligenceProfile(project, system);
   emit(agentItem("selfEvaluator", [
     `Smartness baseline: Lv${intelligence.beforeLevel} -> Lv${intelligence.afterLevel} (${intelligence.delta >= 0 ? "+" : ""}${intelligence.delta}).`,
-    deepProfile.enabled ? "Opus-style deep pass is active for this request." : "Standard quality gate is active.",
-    chatGptContract ? "ChatGPT-grade contract is active: intent recovery, memory use, no stale task drift, and self-revision." : "",
+    deepProfile.enabled ? "Nexa deep pass is active for this request." : "Standard quality gate is active.",
+    chatGptContract ? "Nexa quality contract is active: intent recovery, memory use, no stale task drift, and self-revision." : "",
     "Answer blueprint is active before response generation.",
     "Final responses pass a local quality score before they are saved."
   ].filter(Boolean).join(" ")));
@@ -8510,7 +11366,7 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     ? "Be careful with destructive actions, secrets, credentials, or unsafe instructions."
     : "No special safety risk detected."));
   emit(agentItem("responseGenerator", route.needsCode
-    ? "Compose the final answer in the user's language. Preserve Forge's implementation code or patch; do not replace it with a summary. Do not put questions in the final answer."
+    ? "Compose the final answer in the user's language. Preserve Nexa's implementation code or patch; do not replace it with a summary. Do not put questions in the final answer."
     : "Compose the final user-facing answer in the user's language, using the agent notes silently. Do not put questions in the final answer; use sensible defaults."));
 
   const notes = agents.map((agent) => `## ${agent.name}\n${agent.output}`).join("\n\n");
@@ -8527,12 +11383,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
       {
         role: "system",
         content:
-          "あなたはユーザーの作業を手伝うAIアシスタント Nexa です。内部では Astra, Lattice, Mneme, Navi, Helix, Forge, Quanta, Prism, Proof, Sentinel, Auralis が短く検討済みです。ユーザーには内部ログを見せず、自然な日本語で直接答えてください。自己紹介ではAI会社や内部構造名で名乗らないでください。低スペック環境を想定し、必要以上に長くしないでください。"
+          "あなたはユーザーの作業を手伝うAIアシスタント Nexa です。ユーザーには内部ログを見せず、自然な日本語で直接答えてください。自己紹介ではAI会社や内部構造名で名乗らないでください。低スペック環境を想定し、必要以上に長くしないでください。"
       },
       {
         role: "system",
         content:
-          "For code requests, Forge writes actual implementation code. The final answer must include Forge's code, patch, or file sections when present. Do not replace code with only a plan or summary."
+          "For code requests, Nexa writes actual implementation code. The final answer must include Nexa's code, patch, or file sections when present. Do not replace code with only a plan or summary."
       },
       {
         role: "system",
@@ -8554,7 +11410,7 @@ async function runCompanyAgents(project, userText, history, system, send, attach
       {
         role: "system",
         content:
-          "Use an Opus-style workflow for complex tasks: reconstruct intent, define success criteria, consider alternatives, verify contradictions, then answer. Do not claim the local model is literally Claude Opus unless an Opus-class model is configured."
+          "Use a Nexa deep workflow for complex tasks: reconstruct intent, define success criteria, consider alternatives, verify contradictions, then answer. Do not claim parity with external AI products."
       },
       {
         role: "system",
@@ -8600,6 +11456,10 @@ async function simpleChatStream(req, res) {
       return;
     }
 
+    // A new user message resolves any earlier answer-style choice prompt.
+    // Persisting this avoids a completed card reappearing after reload.
+    resolveLatestChoiceRequest(project);
+
     let creditCharge = null;
     try {
       creditCharge = await consumeRequestCredits(req, 1, "chat");
@@ -8619,16 +11479,30 @@ async function simpleChatStream(req, res) {
         content: clip(stripThinking(message.content || ""), 4000)
       }));
 
+    if (body.mode !== undefined) project.mode = normalizeChatMode(body.mode);
     const attachments = await storeAttachments(project, body.attachments || []);
-    const route = routeCompanyWork(userText);
+    let route = routeCompanyWork(userText);
     route.intent = analyzeUserIntent(userText, project);
     route.needsCode = route.needsCode || route.intent.needsCode;
     route.needsResearch = route.needsResearch || route.intent.needsResearch;
     route.needsCare = route.needsCare || route.intent.needsCare;
     route.isComplex = route.isComplex || route.intent.isTerse || Boolean(route.intent.continuationHint);
-    const autoContext = project.workspaceReady || (route.needsCode && needsWorkspaceCodingContext(userText))
-      ? await workspaceAutoContext(project, userText, attachments)
-      : [];
+    route = applyProjectModeToRoute(project, route, userText);
+    if (isNonExecutingSafetyRequest(userText)) {
+      route.needsCode = false;
+      route.safetyPlanOnly = true;
+    }
+    const pipeline = createNexaPipeline({
+      message: userText,
+      mode: route.mode || project.mode || "chat",
+      route,
+      intent: route.intent,
+      workspaceReady: Boolean(project.workspaceReady),
+      attachmentCount: attachments.length,
+      accessLevel: project.accessLevel,
+      requestedModel: body.options?.modelChoice
+    });
+    const { autoContext, results: toolResults } = await executeNexaToolPlan(pipeline, project, userText, attachments);
     const agentContext = [...attachments, ...autoContext];
     const userMessage = {
       id: id("msg"),
@@ -8651,7 +11525,7 @@ async function simpleChatStream(req, res) {
       id: id("msg"),
       role: "assistant",
       content: "",
-      model: model || "local-fallback",
+      model: publicModelName(model || "local-fallback"),
       agents: [],
       createdAt: now()
     };
@@ -8660,13 +11534,13 @@ async function simpleChatStream(req, res) {
     if (creditCharge?.credits) send("credits", creditCharge.credits);
     send("user", userMessage);
 
-    const company = await runCompanyAgents(project, userText, history, system, send, agentContext);
+    const company = await runCompanyAgents(project, userText, history, system, send, agentContext, { pipeline });
     model = company.model;
-    assistantMessage.model = model || "local-fallback";
+    assistantMessage.model = publicModelName(model || "local-fallback");
     assistantMessage.agents = company.agents.map((agent) => ({
       id: agent.id,
       name: agent.name,
-      model: agent.model,
+      model: publicModelName(agent.model),
       error: agent.error || ""
     }));
     send("assistant-start", assistantMessage);
@@ -8690,13 +11564,13 @@ async function simpleChatStream(req, res) {
         onFallback: (error, nextModel, failedModel) => {
           send("process", {
             messageId: assistantMessage.id,
-            event: processEvent("thinking", "クラウドからローカルへ退避", `${failedModel} が使えなかったため、${nextModel} で続行します。`, {
-              failedModel,
-              fallbackModel: nextModel,
+            event: processEvent("thinking", "クラウドからローカルへ退避", `${publicModelName(failedModel)} が使えなかったため、${publicModelName(nextModel)} で続行します。`, {
+              failedModel: publicModelName(failedModel),
+              fallbackModel: publicModelName(nextModel),
               error: error.message
             })
           });
-          assistantMessage.model = nextModel || assistantMessage.model;
+          assistantMessage.model = publicModelName(nextModel || assistantMessage.model);
         }
       })) {
         const visible = filterThinking(delta);
@@ -8707,7 +11581,7 @@ async function simpleChatStream(req, res) {
     } catch (error) {
       const fallback = model
         ? `AIモデルとの通信で問題が起きました: ${error.message}`
-        : "会話モデルが見つかりません。Ollamaを起動するか、OPENAI_API_KEYを設定するとチャットできます。";
+        : "会話モデルが見つかりません。Ollamaを起動するか、クラウドAPIキーを設定するとチャットできます。";
       assistantMessage.content = fallback;
       send("assistant-delta", { id: assistantMessage.id, delta: fallback });
     }
@@ -8731,6 +11605,142 @@ async function simpleChatStream(req, res) {
   }
 }
 
+function directChatReply(userText = "") {
+  const text = String(userText || "").trim();
+  if (/^(?:こんにちは|こんばんは|おはよう(?:ございます)?|やあ|もしもし)[。.!！\s]*$/i.test(text)) {
+    return "こんにちは。今日は何について話しましょうか？";
+  }
+  if (/^(?:ありがとう|ありがとうございます|助かった|了解|わかった)[。.!！\s]*$/i.test(text)) {
+    return "どういたしまして。";
+  }
+  return "";
+}
+
+function chatReplyHasInternalReasoning(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return true;
+  return /(?:^|\n)\s*(?:Okay,?\s+(?:the\s+)?user|The user (?:asked|wants|is asking)|Let me (?:think|check|make sure)|First,? I need to|I should (?:explain|answer|respond)|Wait,|Looking back,|Possible explanation:|So the answer should|I need to (?:write|keep|make sure)|We need to)/i.test(value) ||
+    /(?:previous conversation|initial instruction|answer in the user's language|check the previous messages|conversation history)/i.test(value);
+}
+
+function chatReplyLooksIncomplete(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return true;
+  if (/[、,:：;；（(\-]$/.test(value)) return true;
+  if (/\b(?:for example|such as|because|and|or|so|but|the|a|an|to)$/i.test(value)) return true;
+  return /(?:例えば|つまり|具体的には|理由は|次のような)[、:：]?$/u.test(value);
+}
+
+async function emitSmoothChatReply(send, messageId, text, signal) {
+  const characters = Array.from(String(text || ""));
+  const chunkSize = characters.length > 900 ? 6 : characters.length > 400 ? 4 : 2;
+  for (let index = 0; index < characters.length; index += chunkSize) {
+    if (signal?.aborted) throw new Error("chat_cancelled");
+    const delta = characters.slice(index, index + chunkSize).join("");
+    send("assistant-delta", { id: messageId, delta });
+    if (characters.length <= 1200) await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function buildChatReasoningSummary(userText = "", reply = "", history = []) {
+  const request = clip(String(userText || "").replace(/\s+/g, " ").trim(), 100);
+  const answer = String(reply || "").trim();
+  const usedContext = history.length > 0 && /^(?:それ|これ|さっき|前の|続き|どうして|なぜ|詳しく)/.test(request);
+  const answerStyle = answer.length <= 80
+    ? "要点だけを短く説明する"
+    : /(?:^|\n)(?:[-*]|\d+[.、])/.test(answer)
+      ? "要点を整理して順序立てて説明する"
+      : "必要な背景を含めて自然な文章で説明する";
+  return [
+    usedContext ? "直前の会話と今回の発言を結び付けて意味を確認しました。" : `「${request}」の意味と求められている説明範囲を確認しました。`,
+    `回答方針: ${answerStyle}。`,
+    "内部メモや未確定の推測は表示せず、完成した回答だけを本文にしました。"
+  ].join("\n");
+}
+
+async function runDirectChatMode({ project, userText, history, system, assistantMessage, send, signal, modelChoice }) {
+  const fixedReply = directChatReply(userText);
+  if (fixedReply) {
+    assistantMessage.model = "Nexa";
+    assistantMessage.content = fixedReply;
+    send("assistant-delta", { id: assistantMessage.id, delta: fixedReply });
+  } else {
+    const model = resolveRequestedModel(system, modelChoice, "conversation") || system.plan.conversation || system.plan.code || system.plan.fast;
+    assistantMessage.model = publicModelName(model || "local-fallback");
+    if (!model) {
+      assistantMessage.content = "会話モデルを起動できませんでした。Nexaを再起動してもう一度送ってください。";
+      send("assistant-delta", { id: assistantMessage.id, delta: assistantMessage.content });
+    } else {
+      try {
+        const cleanHistory = history.slice(-16).map((message) => ({
+          role: message.role,
+          content: clip(sanitizeUserVisibleAssistantText(message.content || ""), 2200)
+        }));
+        const chatMessages = [
+          {
+            role: "system",
+            content: [
+              "あなたはNexaという自然な会話アシスタントです。必ずユーザーの言語で、最新の発言へ直接答えてください。",
+              "チャットモードでは会話だけを行います。コード作業、ファイル操作、開発ログ、AIチームの説明はしません。",
+              "ユーザーが明示的に尋ねない限り、Nexaの内部構造、モデル名、能力一覧、評価点、Lv、プロジェクト記憶には触れません。",
+              "短い発言は直前の同じ会話から自然に解釈します。関係のない古い話題や定型的な自己評価へ結び付けません。",
+              "知らない内容を作らず、簡潔で自然に答えてください。質問が曖昧で回答不能な場合だけ、短い確認を1つ行ってください。",
+              "内部で考えた手順、英語の分析、ユーザー発言の言い換え、回答方針は絶対に出力せず、完成した答えだけを返してください。 /no_think"
+            ].join(" ")
+          },
+          ...cleanHistory,
+          { role: "user", content: userText }
+        ];
+        let reply = await llmChat(model, chatMessages, {
+          numPredict: 900,
+          temperature: 0.42,
+          signal,
+          fallbackModel: localFallbackForKind(system, "conversation")
+        });
+        reply = sanitizeUserVisibleAssistantText(reply).trim();
+        if (chatReplyHasInternalReasoning(reply) || chatReplyLooksIncomplete(reply)) {
+          const repairModel = system.plan.fast && system.plan.fast !== model
+            ? system.plan.fast
+            : localFallbackForKind(system, "conversation");
+          if (!repairModel) throw new Error("chat_response_validation_failed");
+          reply = await llmChat(repairModel, [
+            {
+              role: "system",
+              content: "最新の質問へ日本語で直接答えてください。内部推論、英語の分析、前置きは一切書かず、短く完結した最終回答だけを返してください。 /no_think"
+            },
+            ...cleanHistory.slice(-8),
+            { role: "user", content: userText }
+          ], {
+            numPredict: 500,
+            temperature: 0.2,
+            signal
+          });
+          reply = sanitizeUserVisibleAssistantText(reply).trim();
+          if (chatReplyHasInternalReasoning(reply) || chatReplyLooksIncomplete(reply)) {
+            throw new Error("chat_response_validation_failed");
+          }
+        }
+        assistantMessage.content = reply;
+        await emitSmoothChatReply(send, assistantMessage.id, reply, signal);
+      } catch (error) {
+        assistantMessage.content = error.message === "chat_response_validation_failed"
+          ? "回答を正しく生成できませんでした。もう一度送ってください。"
+          : `会話モデルとの通信に失敗しました: ${error.message}`;
+        send("assistant-delta", { id: assistantMessage.id, delta: assistantMessage.content });
+      }
+    }
+  }
+  assistantMessage.content = sanitizeUserVisibleAssistantText(assistantMessage.content).trim() || "うまく回答を生成できませんでした。";
+  assistantMessage.reasoningSummary = buildChatReasoningSummary(userText, assistantMessage.content, history);
+  assistantMessage.agents = [];
+  assistantMessage.processEvents = [];
+  project.messages.push(assistantMessage);
+  project.summary ||= clip(userText, 180);
+  await saveProject(project);
+  send("assistant-complete", assistantMessage);
+  send("project", projectSummary(project));
+}
+
 async function companyChatStream(req, res) {
   const send = sse(res);
   const abortController = new AbortController();
@@ -8747,12 +11757,22 @@ async function companyChatStream(req, res) {
       return;
     }
 
-    const userText = String(body.message || "").trim();
-    if (!userText) {
+    const submittedText = String(body.message || "").trim();
+    if (!submittedText) {
       send("error", { error: "empty_message" });
       res.end();
       return;
     }
+    let resumedSafetyPlan = pendingSafetyPlanContinuation(project, submittedText);
+    let userText = resumedSafetyPlan
+      ? `${resumedSafetyPlan.executableRequest}\n直前に提示した安全な代替案に沿って進め、破壊的変更の前に最終確認を取って。`
+      : submittedText;
+    let safetyDecision = null;
+    let codeFollowUpDecision = null;
+    let semanticIntentDecision = null;
+
+    // The user has continued the conversation, so any previous choice is done.
+    resolveLatestChoiceRequest(project);
 
     let creditCharge = null;
     try {
@@ -8777,7 +11797,7 @@ async function companyChatStream(req, res) {
       const userMessage = {
         id: id("msg"),
         role: "user",
-        content: userText,
+        content: submittedText,
         attachments: attachments.map(({ id: fileId, name, type, size, source, path: contextPath }) => ({
           id: fileId,
           name,
@@ -8813,6 +11833,24 @@ async function companyChatStream(req, res) {
     }
 
     const system = await systemProfile();
+    const pendingPlan = latestPendingSafetyPlan(project);
+    if (pendingPlan) {
+      safetyDecision = await resolveSafetyActionDecision(pendingPlan, submittedText, system);
+      if (safetyDecision.decision === "approve") {
+        resumedSafetyPlan = pendingPlan;
+        userText = `${pendingPlan.executableRequest}\n直前に提示した安全な代替案に沿って進め、破壊的変更の前に最終確認を取って。`;
+      }
+    }
+    if (!resumedSafetyPlan) {
+      semanticIntentDecision = await resolveTurnIntentWithAi(project, submittedText, system);
+      if (semanticIntentDecision?.confidence >= 0.62 && semanticIntentDecision.resolvedRequest) {
+        semanticIntentDecision.resolvedRequest = semanticExecutionRequest(semanticIntentDecision, submittedText);
+        userText = semanticIntentDecision.resolvedRequest;
+      } else {
+        codeFollowUpDecision = resolveCodeFollowUpContext(project, submittedText);
+        if (codeFollowUpDecision?.effectiveRequest) userText = codeFollowUpDecision.effectiveRequest;
+      }
+    }
     const history = project.messages
       .slice(-18)
       .filter((message) => message.role === "user" || message.role === "assistant")
@@ -8822,20 +11860,52 @@ async function companyChatStream(req, res) {
       }));
 
     const attachments = await storeAttachments(project, body.attachments || []);
-    const route = routeCompanyWork(userText);
+    let route = routeCompanyWork(userText);
     route.intent = analyzeUserIntent(userText, project);
     route.needsCode = route.needsCode || route.intent.needsCode;
     route.needsResearch = route.needsResearch || route.intent.needsResearch;
     route.needsCare = route.needsCare || route.intent.needsCare;
     route.isComplex = route.isComplex || route.intent.isTerse || Boolean(route.intent.continuationHint);
-    const autoContext = project.workspaceReady || (route.needsCode && needsWorkspaceCodingContext(userText))
-      ? await workspaceAutoContext(project, userText, attachments)
-      : [];
+    if (semanticIntentDecision?.confidence >= 0.62) {
+      const semanticCodeActions = new Set(["create", "modify", "debug", "continue", "computer", "command"]);
+      route.needsCode = route.needsCode || semanticIntentDecision.needsCode || semanticCodeActions.has(semanticIntentDecision.action);
+      route.needsResearch = route.needsResearch || semanticIntentDecision.needsResearch;
+      route.isComplex = route.isComplex || semanticIntentDecision.continuation || semanticIntentDecision.action !== "chat";
+      route.intent = {
+        ...route.intent,
+        semanticAction: semanticIntentDecision.action,
+        semanticTarget: semanticIntentDecision.target,
+        continuation: semanticIntentDecision.continuation,
+        continuationHint: semanticIntentDecision.continuation ? semanticIntentDecision.resolvedRequest : route.intent.continuationHint,
+        inferredGoal: semanticIntentDecision.resolvedRequest || route.intent.inferredGoal,
+        failureFollowUp: semanticIntentDecision.action === "debug",
+        needsCode: route.needsCode,
+        needsResearch: route.needsResearch,
+        needsInternet: semanticIntentDecision.needsInternet,
+        needsComputer: semanticIntentDecision.needsComputer
+      };
+    }
+    route = applyProjectModeToRoute(project, route, userText);
+    if (isNonExecutingSafetyRequest(userText)) {
+      route.needsCode = false;
+      route.safetyPlanOnly = true;
+    }
+    const pipeline = createNexaPipeline({
+      message: userText,
+      mode: route.mode || project.mode || "chat",
+      route,
+      intent: route.intent,
+      workspaceReady: Boolean(project.workspaceReady),
+      attachmentCount: attachments.length,
+      accessLevel: project.accessLevel,
+      requestedModel: body.options?.modelChoice
+    });
+    const { autoContext, results: toolResults } = await executeNexaToolPlan(pipeline, project, userText, attachments);
     const agentContext = [...attachments, ...autoContext];
     const userMessage = {
       id: id("msg"),
       role: "user",
-      content: userText,
+      content: submittedText,
       attachments: attachments.map(({ id: fileId, name, type, size, source, path: contextPath }) => ({
         id: fileId,
         name,
@@ -8863,13 +11933,101 @@ async function companyChatStream(req, res) {
       createdAt: now()
     };
     send("assistant-start", assistantMessage);
-    const startEvent = processEvent("thinking", "依頼を解析", "AIチームを準備しています。");
+    if (route.modeForcedChat) {
+      await runDirectChatMode({
+        project,
+        userText: submittedText,
+        history,
+        system,
+        assistantMessage,
+        send,
+        signal: abortController.signal,
+        modelChoice: body.options?.modelChoice
+      });
+      finished = true;
+      res.end();
+      return;
+    }
+    const startEvent = processEvent("thinking", "依頼を受け取る", clip(userText, 180));
     assistantMessage.processEvents.push(startEvent);
     send("process", { messageId: assistantMessage.id, event: startEvent });
+    if (safetyDecision) {
+      const safetyEvent = processEvent(
+        safetyDecision.decision === "approve" ? "done" : "thinking",
+        "安全判断AIが続行意図を確認",
+        `${safetyDecision.decision} / ${Math.round(safetyDecision.confidence * 100)}% / ${safetyDecision.reason}`,
+        safetyDecision
+      );
+      assistantMessage.processEvents.push(safetyEvent);
+      send("process", { messageId: assistantMessage.id, event: safetyEvent });
+      send("agent", {
+        id: "safetyDecision",
+        name: "Nexa Safety",
+        title: "安全判断",
+        model: safetyDecision.model || "deterministic-safety-fallback",
+        status: "complete",
+        output: `${safetyDecision.decision}: ${safetyDecision.reason}`
+      });
+    }
+    if (semanticIntentDecision?.confidence >= 0.62) {
+      const intentEvent = processEvent(
+        "done",
+        "意図判断AIが処理方針を決定",
+        `${semanticIntentDecision.action} / ${semanticIntentDecision.target} / ${Math.round(semanticIntentDecision.confidence * 100)}% / ${semanticIntentDecision.reason}`,
+        semanticIntentDecision
+      );
+      assistantMessage.processEvents.push(intentEvent);
+      send("process", { messageId: assistantMessage.id, event: intentEvent });
+      send("agent", {
+        id: "intentDecision",
+        name: "Nexa Intent",
+        title: "意味・文脈判断",
+        model: semanticIntentDecision.model,
+        status: "complete",
+        output: semanticIntentDecision.resolvedRequest
+      });
+    }
+    if (codeFollowUpDecision) {
+      const contextEvent = processEvent(
+        "done",
+        "継続ターン判断AIがデバッグ対象を復元",
+        codeFollowUpDecision.previousGoal
+          ? `直前の実装目的を引き継ぎ、${submittedText} を不具合報告として処理します。`
+          : "現在の作業フォルダーを新規作成せず、既存実装のデバッグ対象として処理します。",
+        codeFollowUpDecision
+      );
+      assistantMessage.processEvents.push(contextEvent);
+      send("process", { messageId: assistantMessage.id, event: contextEvent });
+      send("agent", {
+        id: "contextDecision",
+        name: "Nexa Context",
+        title: "継続意図判断",
+        model: codeFollowUpDecision.source,
+        status: "complete",
+        output: `debug: ${codeFollowUpDecision.previousGoal || submittedText}`
+      });
+    }
 
-    const earlyChoiceRequest = preflightChoiceRequest(project, userText, route, attachments, autoContext);
+    // "OK、それやって" immediately after a safety plan is the user's
+    // explicit approval of that plan. Do not ask for the same approval again.
+    const fullAccessDestructiveApproval = normalizeAccessLevel(project.accessLevel) === "full" &&
+      !isNonExecutingSafetyRequest(userText) &&
+      isDestructiveOperationRequest(userText);
+    const choiceResolution = body.options?.choiceResolution || (resumedSafetyPlan || fullAccessDestructiveApproval ? {
+      requestId: "safety-plan-continuation",
+      optionId: "workspace-delete-confirm",
+      action: "send-prompt"
+    } : null);
+    if (["safe-plan", "explain-risk"].includes(choiceResolution?.optionId)) {
+      route.needsCode = false;
+      route.needsCare = true;
+      route.safetyPlanOnly = true;
+      pipeline.route.needsCode = false;
+      pipeline.route.safetyPlanOnly = true;
+    }
+    const earlyChoiceRequest = preflightChoiceRequest(project, userText, route, attachments, autoContext, choiceResolution);
     if (earlyChoiceRequest) {
-      assistantMessage.model = "local-choice-router";
+      assistantMessage.model = "Nexa";
       assistantMessage.content = choiceRequestIntro(earlyChoiceRequest);
       assistantMessage.choiceRequest = earlyChoiceRequest;
       assistantMessage.agents = [
@@ -8881,7 +12039,7 @@ async function companyChatStream(req, res) {
           id: agent.id,
           name: agent.name,
           title: agent.name,
-          model: agent.model,
+          model: publicModelName(agent.model),
           status: "complete",
           output: agent.output
         });
@@ -8914,15 +12072,31 @@ async function companyChatStream(req, res) {
       return;
     }
 
+    if (choiceResolution?.optionId === "workspace-delete-confirm") {
+      const staged = await stageConfirmedWorkspaceRebuild(project);
+      assistantMessage.workspaceRebuild = staged;
+      const stageEvent = processEvent(
+        "edit",
+        "既存ファイルを安全に退避",
+        staged.moved.length
+          ? `${staged.moved.length}件を ${staged.backupPath} へ退避しました。保護対象は変更していません。`
+          : "退避が必要な既存ファイルはありませんでした。",
+        { backupPath: staged.backupPath, moved: staged.moved, protected: staged.protected }
+      );
+      assistantMessage.processEvents.push(stageEvent);
+      send("process", { messageId: assistantMessage.id, event: stageEvent });
+    }
+
     const company = await runCompanyAgents(project, userText, history, system, send, agentContext, {
       signal: abortController.signal,
       modelChoice: body.options?.modelChoice,
       reasoningLevel: body.options?.reasoningLevel,
-      planMode: body.options?.planMode || body.options?.mode === "plan",
+      planMode: route.safetyPlanOnly || body.options?.planMode || body.options?.mode === "plan",
       performance: body.options?.performance,
       processEvents: assistantMessage.processEvents,
       send,
-      messageId: assistantMessage.id
+      messageId: assistantMessage.id,
+      pipeline
     });
     const model = company.model;
     let streamFallbackEmitted = false;
@@ -8932,25 +12106,52 @@ async function companyChatStream(req, res) {
       const fallbackEvent = processEvent(
         "thinking",
         "クラウドからローカルへ退避",
-        `${failedModel} が使えなかったため、${nextModel} で回答を続行します。`,
-        { failedModel, fallbackModel: nextModel, error: error.message }
+        `${publicModelName(failedModel)} が使えなかったため、${publicModelName(nextModel)} で回答を続行します。`,
+        { failedModel: publicModelName(failedModel), fallbackModel: publicModelName(nextModel), error: error.message }
       );
       assistantMessage.processEvents.push(fallbackEvent);
       send("process", { messageId: assistantMessage.id, event: fallbackEvent });
-      assistantMessage.model = nextModel || assistantMessage.model;
+      assistantMessage.model = publicModelName(nextModel || assistantMessage.model);
     };
-    assistantMessage.model = model || "local-fallback";
+    assistantMessage.model = publicModelName(model || "local-fallback");
     assistantMessage.agents = company.agents.map((agent) => ({
       id: agent.id,
       name: agent.name,
-      model: agent.model,
+      model: publicModelName(agent.model),
       error: agent.error || ""
     }));
+    if (safetyDecision) {
+      assistantMessage.agents.unshift({
+        id: "safetyDecision",
+        name: "Nexa Safety",
+        model: safetyDecision.model || "deterministic-safety-fallback",
+        error: safetyDecision.decision === "unclear" ? safetyDecision.reason : ""
+      });
+    }
+    if (codeFollowUpDecision) {
+      assistantMessage.agents.unshift({
+        id: "contextDecision",
+        name: "Nexa Context",
+        model: codeFollowUpDecision.source,
+        error: ""
+      });
+    }
+    if (semanticIntentDecision?.confidence >= 0.62) {
+      assistantMessage.agents.unshift({
+        id: "intentDecision",
+        name: "Nexa Intent",
+        model: semanticIntentDecision.model,
+        error: ""
+      });
+    }
     try {
       const codeCapabilityReply = workspaceCodeCapabilityDirectReply(project, userText);
       const folderReply = route.needsCode ? "" : folderOverviewDirectReply(project, autoContext, userText);
       const directIntro = assistantSelfIntroductionReply(userText);
-      const choiceRequest = preflightChoiceRequest(project, userText, route, attachments, autoContext);
+      const chatCapabilityReply = assistantChatCapabilityReply(userText, route.mode);
+      const nexaStrengthsReply = assistantNexaStrengthsReply(userText, route.mode);
+      const safetyReply = safetyPlanDirectReply(project, userText, route);
+      const choiceRequest = preflightChoiceRequest(project, userText, route, attachments, autoContext, choiceResolution);
       if (choiceRequest) {
         assistantMessage.content = choiceRequestIntro(choiceRequest);
         assistantMessage.choiceRequest = choiceRequest;
@@ -8961,6 +12162,15 @@ async function companyChatStream(req, res) {
         assistantMessage.processEvents.push(choiceEvent);
         send("process", { messageId: assistantMessage.id, event: choiceEvent });
         send("assistant-delta", { id: assistantMessage.id, delta: assistantMessage.content });
+      } else if (safetyReply) {
+        assistantMessage.content = safetyReply;
+        assistantMessage.safetyPlan = {
+          originalRequest: userText,
+          executableRequest: executableRequestFromSafetyPrompt(userText),
+          status: "awaiting-confirmation",
+          createdAt: now()
+        };
+        send("assistant-delta", { id: assistantMessage.id, delta: safetyReply });
       } else if (route.intent?.videoUnsupported) {
         assistantMessage.content = "このビルドでは動画生成を外して、画像生成だけを残しました。動画として作ったふりはしません。代わりに、同じ内容を1枚の完成イメージとして画像生成するか、複数場面の絵コンテに分解できます。";
         assistantMessage.choiceRequest = videoDisabledChoiceRequest(userText);
@@ -8974,11 +12184,19 @@ async function companyChatStream(req, res) {
       } else if (directIntro) {
         assistantMessage.content = directIntro;
         send("assistant-delta", { id: assistantMessage.id, delta: directIntro });
+      } else if (chatCapabilityReply) {
+        assistantMessage.content = chatCapabilityReply;
+        send("assistant-delta", { id: assistantMessage.id, delta: chatCapabilityReply });
+      } else if (nexaStrengthsReply) {
+        assistantMessage.content = nexaStrengthsReply;
+        send("assistant-delta", { id: assistantMessage.id, delta: nexaStrengthsReply });
       } else {
         const coderOutput = route.needsCode
           ? company.agents.find((agent) => agent.id === "coder")?.output || ""
           : "";
-        if (coderOutput && !coderOutput.startsWith("fallback:")) {
+        const forceFreshRebuild = choiceResolution?.optionId === "workspace-delete-confirm";
+        const forceContextRepair = codeFollowUpDecision?.action === "debug" || semanticIntentDecision?.action === "debug";
+        if (forceFreshRebuild || forceContextRepair || (coderOutput && !coderOutput.startsWith("fallback:"))) {
           const finalCoderOutput = await materializeCoderOutput(
             project,
             route,
@@ -8992,44 +12210,11 @@ async function companyChatStream(req, res) {
               send,
               messageId: assistantMessage.id,
               fallbackModel: company.fallbackModel,
+              forceFreshRebuild: forceFreshRebuild || forceContextRepair,
+              workspaceRebuild: assistantMessage.workspaceRebuild || null,
               onFallback: onStreamFallback
             }
           );
-          assistantMessage.content = finalCoderOutput;
-          send("assistant-delta", { id: assistantMessage.id, delta: assistantMessage.content });
-        } else if (coderOutput && !coderOutput.startsWith("fallback:")) {
-          let finalCoderOutput = cleanCoderOutput(coderOutput);
-          const fileBlocks = project.workspaceReady ? extractGeneratedFileBlocks(finalCoderOutput) : [];
-          const patch = project.workspaceReady && !fileBlocks.length ? extractUnifiedPatch(finalCoderOutput) : "";
-          if (fileBlocks.length) {
-            try {
-              const writeResult = await writeGeneratedFileBlocks(project, fileBlocks);
-              if (writeResult.project?.runs) project.runs = writeResult.project.runs;
-              finalCoderOutput = codeWriteProcessSummary(project, "file-block", writeResult);
-            } catch (error) {
-              finalCoderOutput = `${codeWriteProcessSummary(project, "file-block", { files: [] }, error.message)}\n\n${finalCoderOutput}`;
-            }
-          } else if (patch) {
-            try {
-              const patchResult = await workspacePatch({ projectId: project.id, patch, dryRun: false });
-              if (patchResult.project?.runs) project.runs = patchResult.project.runs;
-              finalCoderOutput = `${codeWriteProcessSummary(project, "patch", patchResult)}\n\n${finalCoderOutput}`;
-            } catch (error) {
-              finalCoderOutput = `${finalCoderOutput}\n\nパッチは自動適用できませんでした: ${error.message}`;
-              finalCoderOutput = `${codeWriteProcessSummary(project, "patch", { files: [] }, error.message)}\n\n${cleanCoderOutput(coderOutput)}`;
-            }
-          } else if (!project.workspaceReady && route.needsCode) {
-            finalCoderOutput = `${finalCoderOutput}\n\nファイルへ直接書き込むには、先に作業フォルダーを選択してください。`;
-          } else if (project.workspaceReady && route.needsCode) {
-            finalCoderOutput = [
-              "作業過程",
-              `1. 作業フォルダーを確認: ${project.selectedFolderName || project.name || "workspace"}`,
-              "2. Coderがコード案を生成",
-              "3. 直接書き込み用のfileブロックまたは有効なdiffが見つからなかったため、ファイル保存は行いませんでした。",
-              "",
-              finalCoderOutput
-            ].join("\n");
-          }
           assistantMessage.content = finalCoderOutput;
           send("assistant-delta", { id: assistantMessage.id, delta: assistantMessage.content });
         } else {
@@ -9055,7 +12240,7 @@ async function companyChatStream(req, res) {
     } catch (error) {
       const fallback = model
         ? `AIモデルとの通信で問題が起きました: ${error.message}`
-        : "会話モデルが見つかりません。Ollamaを起動するか、OPENAI_API_KEYを設定するとチャットできます。";
+        : "会話モデルが見つかりません。Ollamaを起動するか、クラウドAPIキーを設定するとチャットできます。";
       assistantMessage.content = fallback;
       send("assistant-delta", { id: assistantMessage.id, delta: fallback });
     }
@@ -9104,8 +12289,8 @@ async function companyChatStream(req, res) {
     assistantMessage.processEvents ||= [];
     const qualityEvent = processEvent(
       revisedByQualityGate ? "edit" : "done",
-      "Vela quality gate",
-      `score ${quality.score}/100 (${quality.grade})${revisedByQualityGate ? " / revised" : ""}`,
+      "品質確認",
+      `${quality.score}/100 (${quality.grade})${revisedByQualityGate ? " / 回答を保存前に補正しました" : " / 追加補正なし"}`,
       { score: quality.score, grade: quality.grade, revised: revisedByQualityGate, reasons: quality.reasons }
     );
     assistantMessage.processEvents.push(qualityEvent);
@@ -9117,14 +12302,14 @@ async function companyChatStream(req, res) {
       id: evalAgent.id,
       name: evalAgent.name,
       title: evalAgent.name,
-      model: evalAgent.model,
+      model: publicModelName(evalAgent.model),
       status: "complete",
       output: evalAgent.output
     });
     assistantMessage.agents = company.agents.map((agent) => ({
       id: agent.id,
       name: agent.name,
-      model: agent.model,
+      model: publicModelName(agent.model),
       error: agent.error || ""
     }));
     project.messages.push(assistantMessage);
@@ -9137,7 +12322,7 @@ async function companyChatStream(req, res) {
       agents: company.agents.map((agent) => ({
         id: agent.id,
         name: agent.name,
-        model: agent.model,
+        model: publicModelName(agent.model),
         output: clip(agent.output, agent.id === "coder" ? 6000 : 1200),
         error: agent.error || ""
       })),
@@ -9146,6 +12331,10 @@ async function companyChatStream(req, res) {
       intent: company.intent || null,
       intelligence: company.intelligence,
       quality: assistantMessage.quality
+      ,pipeline: {
+        ...pipelineSummary(pipeline),
+        toolResults
+      }
     });
     project.runs = project.runs.slice(-60);
     await saveProject(project);
@@ -9301,16 +12490,19 @@ async function executeShell(req, res) {
       json(res, 400, { ok: false, error: "command_too_long" });
       return;
     }
-    assertShellSafety(project, command, "shell");
+    const dangerous = isDangerousShellCommand(command);
+    assertOperationApproval(project, "shell", { dangerous, approved: body.approved === true });
+    assertShellSafety(project, command, "shell", body.approved === true);
 
-    const result = await runShellCommand(command, Math.min(30000, Math.max(1000, Number(body.timeoutMs || 15000))));
+    const cwd = project?.workspaceReady ? projectWorkspaceRootPath(project) : WORKSPACE_ROOT;
+    const result = await runShellCommand(command, Math.min(30000, Math.max(1000, Number(body.timeoutMs || 15000))), cwd);
     if (project) {
       project.runs.push({
         id: id("run"),
         type: "shell",
         createdAt: now(),
         command,
-        cwd: ".",
+        cwd,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         timedOut: result.timedOut,
@@ -9332,6 +12524,75 @@ async function executeShell(req, res) {
       await saveProject(project);
     }
     json(res, 200, result);
+  } catch (error) {
+    json(res, error.status || 500, { ok: false, error: error.message, code: error.code || "" });
+  }
+}
+
+function quotePowerShellLiteral(value = "") {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+async function executeComputerAction(req, res) {
+  try {
+    const body = await readBody(req, 128 * 1024);
+    const project = body.projectId ? await getProject(body.projectId) : null;
+    if (body.projectId && !project) return json(res, 404, { ok: false, error: "project_not_found" });
+    const action = String(body.action || "");
+    const value = String(body.value || "").trim();
+    if (!value || !["open-path", "open-url", "start-app"].includes(action)) {
+      return json(res, 400, { ok: false, error: "computer_action_invalid" });
+    }
+    if (action === "open-url" && !/^https?:\/\//i.test(value)) {
+      return json(res, 400, { ok: false, error: "computer_url_invalid" });
+    }
+    const dangerous = action === "start-app" && /(?:regedit|diskpart|format|shutdown|powershell|cmd(?:\.exe)?$)/i.test(value);
+    const capabilities = assertOperationApproval(project, `computer:${action}`, {
+      dangerous,
+      approved: body.approved === true
+    });
+    if (!capabilities.canControlComputer && normalizeAccessLevel(project?.accessLevel) !== "safety") {
+      // Always-approval mode may run after explicit approval; safety mode may
+      // open ordinary paths/apps without asking.
+      if (!(body.approved === true && capabilities.approvalPolicy === "always")) {
+        throw permissionError("computer_control_not_allowed", "computer control requires approval or full access");
+      }
+    }
+    const command = `Start-Process -FilePath ${quotePowerShellLiteral(value)}`;
+    const result = await runShellCommand(command, 15000, project?.workspaceReady ? projectWorkspaceRootPath(project) : WORKSPACE_ROOT);
+    json(res, result.ok ? 200 : 500, { ...result, action, value });
+  } catch (error) {
+    json(res, error.status || 500, { ok: false, error: error.message, code: error.code || "" });
+  }
+}
+
+async function executeNetworkFetch(req, res) {
+  try {
+    const body = await readBody(req, 128 * 1024);
+    const project = body.projectId ? await getProject(body.projectId) : null;
+    if (body.projectId && !project) return json(res, 404, { ok: false, error: "project_not_found" });
+    const target = String(body.url || "").trim();
+    if (!/^https?:\/\//i.test(target)) return json(res, 400, { ok: false, error: "network_url_invalid" });
+    assertOperationApproval(project, "internet", { dangerous: false, approved: body.approved === true });
+    const response = await fetch(target, {
+      method: "GET",
+      headers: { "user-agent": "Nexa/3.0" },
+      signal: AbortSignal.timeout(Math.min(30000, Math.max(1000, Number(body.timeoutMs || 15000))))
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > 2 * 1024 * 1024) return json(res, 413, { ok: false, error: "network_response_too_large" });
+    const text = /(?:text|json|javascript|xml|html)/i.test(contentType)
+      ? new TextDecoder().decode(bytes)
+      : "";
+    json(res, 200, {
+      ok: response.ok,
+      status: response.status,
+      url: response.url,
+      contentType,
+      size: bytes.byteLength,
+      text: clip(text, 200000)
+    });
   } catch (error) {
     json(res, error.status || 500, { ok: false, error: error.message, code: error.code || "" });
   }
@@ -9364,6 +12625,112 @@ async function workspaceCheckCommands(project = null) {
   if (scripts.lint) add("npm run lint");
   if (scripts.typecheck) add("npm run typecheck");
   return commands.slice(0, 8);
+}
+
+function shellQuote(value = "") {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function fileSpecificCheckCommands(files = []) {
+  const commands = [];
+  const add = (command) => {
+    const clean = String(command || "").trim();
+    if (clean && !commands.includes(clean)) commands.push(clean);
+  };
+
+  for (const file of files.slice(0, 12)) {
+    const rel = String(file.path || "").replace(/\\/g, "/");
+    const ext = path.extname(rel).toLowerCase();
+    if (!rel || rel.includes("..")) continue;
+    if ([".js", ".mjs", ".cjs"].includes(ext)) add(`node --check ${shellQuote(rel)}`);
+    if (ext === ".py") add(`python -m py_compile ${shellQuote(rel)}`);
+  }
+
+  return commands;
+}
+
+async function postWriteCheckCommands(project, files = []) {
+  const fileChecks = fileSpecificCheckCommands(files);
+  const projectChecks = await workspaceCheckCommands(project);
+  const focusedProjectChecks = projectChecks.filter((command) =>
+    /node --check|npm run (lint|typecheck)|npm test/i.test(command)
+  );
+  return normalizeCheckCommands([...fileChecks, ...focusedProjectChecks]).slice(0, 6);
+}
+
+async function runPostWriteChecksForFiles(project, files = [], options = {}) {
+  if (!project?.workspaceReady || !files.length) return { ran: false, ok: true, results: [], commands: [] };
+  const commands = await postWriteCheckCommands(project, files);
+  if (!commands.length) return { ran: false, ok: true, results: [], commands: [] };
+  try {
+    assertCodexPermission(project, "checks");
+    for (const command of commands) assertShellSafety(project, command, "checks");
+  } catch (error) {
+    return { ran: false, ok: false, results: [], commands, error: error.message };
+  }
+
+  emitProcessEvent(options, processEvent("command", "最後にエラーが出ないか確認します", commands.join("\n"), { commands }));
+  const cwd = projectWorkspaceRootPath(project);
+  const startedAt = Date.now();
+  const results = [];
+  for (const command of commands) {
+    results.push(await runShellCommand(command, 25000, cwd));
+  }
+  const durationMs = Date.now() - startedAt;
+  const ok = results.every((result) => result.ok);
+  const summary = results.every((result) => result.ok)
+    ? `${results.length}件の確認が通りました。エラーは見つかりませんでした。`
+    : `${results.filter((result) => result.ok).length}/${results.length}件の確認が通りました。修正が必要な結果があります。`;
+
+  project.runs.push({
+    id: id("run"),
+    type: "post-write-checks",
+    createdAt: now(),
+    command: "post-write checks",
+    cwd: project.workspaceRoot || ".",
+    exitCode: ok ? 0 : 1,
+    durationMs,
+    timedOut: results.some((result) => result.timedOut),
+    stdout: clip(results.map((result) => `> ${result.command}\n${result.stdout || ""}`).join("\n\n"), 16000),
+    stderr: clip(results.map((result) => result.stderr || "").filter(Boolean).join("\n\n"), 12000),
+    checks: results.map((result) => ({
+      command: result.command,
+      ok: result.ok,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      timedOut: result.timedOut,
+      stdout: clip(result.stdout, 5000),
+      stderr: clip(result.stderr, 3500)
+    })),
+    agents: [{
+      id: "checks",
+      name: "Nexa",
+      title: "エラー確認",
+      model: "local-shell",
+      output: summary,
+      error: ok ? "" : "one or more checks failed"
+    }],
+    modelPlan: {}
+  });
+  project.runs = project.runs.slice(-80);
+  await saveProject(project);
+  emitProcessEvent(options, processEvent(ok ? "done" : "error", ok ? "エラー確認が完了しました" : "エラーを見つけました", summary, { commands, results }));
+  return { ran: true, ok, results, commands, durationMs };
+}
+
+function postWriteChecksSummary(checks = {}) {
+  if (!checks.ran) {
+    return checks.error ? `エラー確認を実行できませんでした: ${checks.error}` : "";
+  }
+  const lines = [
+    "エラー確認",
+    ...checks.results.map((result) => {
+      const status = result.ok ? "OK" : "修正が必要";
+      const tail = result.stderr || result.stdout || "";
+      return `- ${status}: ${result.command}${tail ? `\n  ${clip(tail.replace(/\s+/g, " "), 420)}` : ""}`;
+    })
+  ];
+  return lines.join("\n");
 }
 
 function normalizeCheckCommands(commands) {
@@ -9465,9 +12832,12 @@ async function serveStatic(url, res, method = "GET") {
   }
   try {
     const content = await readFile(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const shouldRevalidate = ext === ".html" || ext === ".js" || ext === ".css";
     res.writeHead(200, {
-      "content-type": MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream",
-      "content-length": content.length
+      "content-type": MIME[ext] || "application/octet-stream",
+      "content-length": content.length,
+      ...(shouldRevalidate ? { "cache-control": "no-cache" } : {})
     });
     if (method === "HEAD") {
       res.end();
@@ -9500,13 +12870,28 @@ async function latestInstallerFile() {
   return candidates[0] || null;
 }
 
+async function publishedInstallerUrl() {
+  if (process.env.NEXA_INSTALLER_URL) return process.env.NEXA_INSTALLER_URL;
+  try {
+    const packageJson = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
+    const version = String(packageJson.version || "").trim();
+    if (!version) return "";
+    return `https://github.com/ainexa0706-ux/Nexa/releases/download/v${version}/Nexa-Setup-${version}.exe`;
+  } catch {
+    return "";
+  }
+}
+
 async function serveInstaller(req, res) {
   const installer = await latestInstallerFile();
   if (!installer) {
-    json(res, 404, {
-      error: "installer_not_found",
-      message: "Run npm run dist:win to build the Windows installer."
-    });
+    const publishedUrl = await publishedInstallerUrl();
+    if (publishedUrl) {
+      res.writeHead(302, { location: publishedUrl, "cache-control": "no-store" });
+      res.end();
+      return;
+    }
+    json(res, 404, { error: "installer_not_found", message: "Published installer is not configured." });
     return;
   }
   const { fileName, filePath } = installer;
@@ -9589,7 +12974,7 @@ async function handleAuthApi(req, res, url) {
     if (record.status === "complete" && record.sessionToken) {
       setSessionCookie(res, record.sessionToken);
       DESKTOP_OAUTH_STATES.delete(state);
-      json(res, 200, { status: "complete", user: record.user });
+      json(res, 200, { status: "complete", user: record.user, desktopSessionToken: record.sessionToken });
       return true;
     }
     json(res, 200, { status: "pending" });
@@ -9704,7 +13089,7 @@ async function handleAuthApi(req, res, url) {
     store.sessions.push(session);
     await writeAuthStore(store);
     setSessionCookie(res, token);
-    json(res, 201, { user: publicUser(user), firstUser });
+    json(res, 201, { user: publicUser(user), firstUser, ...desktopSessionPayload(token, session) });
     return true;
   }
 
@@ -9728,7 +13113,7 @@ async function handleAuthApi(req, res, url) {
     store.sessions.push(session);
     await writeAuthStore(store);
     setSessionCookie(res, token);
-    json(res, 200, { user: publicUser(user) });
+    json(res, 200, { user: publicUser(user), ...desktopSessionPayload(token, session) });
     return true;
   }
 
@@ -10019,6 +13404,63 @@ async function handleAdminApi(req, res, url) {
   return false;
 }
 
+async function handleSocialApi(req, res, url) {
+  if (!url.pathname.startsWith("/api/social")) return false;
+
+  if (req.method === "GET" && url.pathname === "/api/social/status") {
+    json(res, 200, publicSocialStore(await readSocialOpsStore()));
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/social/campaigns") {
+    try {
+      json(res, 201, await createSocialCampaign(await readBody(req, 256 * 1024)));
+    } catch (error) {
+      json(res, error.status || 400, { error: error.message, code: error.code || "" });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/social/accounts") {
+    try {
+      json(res, 201, await addSocialAccount(await readBody(req, 64 * 1024)));
+    } catch (error) {
+      json(res, error.status || 400, { error: error.message, code: error.code || "" });
+    }
+    return true;
+  }
+
+  const postActionMatch = url.pathname.match(/^\/api\/social\/posts\/([^/]+)\/(approve|publish|cancel)$/);
+  if (req.method === "POST" && postActionMatch) {
+    try {
+      const postId = decodeURIComponent(postActionMatch[1]);
+      const action = postActionMatch[2];
+      const status = action === "approve" ? "approved" : action === "cancel" ? "canceled" : "published";
+      const result = await updateSocialPost(postId, { status });
+      json(res, 200, {
+        ...result,
+        manualPublish: action === "publish",
+        note: action === "publish" ? "SNS API未設定のため、手動公開済みとして記録しました" : ""
+      });
+    } catch (error) {
+      json(res, error.status || 400, { error: error.message, code: error.code || "" });
+    }
+    return true;
+  }
+
+  const postMatch = url.pathname.match(/^\/api\/social\/posts\/([^/]+)$/);
+  if (req.method === "PATCH" && postMatch) {
+    try {
+      json(res, 200, await updateSocialPost(decodeURIComponent(postMatch[1]), await readBody(req, 256 * 1024)));
+    } catch (error) {
+      json(res, error.status || 400, { error: error.message, code: error.code || "" });
+    }
+    return true;
+  }
+
+  return false;
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   try {
@@ -10044,7 +13486,7 @@ async function route(req, res) {
 
     const cookieApiWrite =
       ["POST", "PATCH", "DELETE"].includes(req.method) &&
-      (url.pathname.startsWith("/api/auth") || url.pathname.startsWith("/api/admin") || url.pathname.startsWith("/api/billing")) &&
+      (url.pathname.startsWith("/api/auth") || url.pathname.startsWith("/api/admin") || url.pathname.startsWith("/api/billing") || url.pathname.startsWith("/api/social")) &&
       url.pathname !== "/api/billing/webhook";
     if (cookieApiWrite && !trustedOrigin(req)) {
       jsonError(res, 403, "untrusted_origin");
@@ -10054,6 +13496,7 @@ async function route(req, res) {
     if (await handleAuthApi(req, res, url)) return;
     if (await handleBillingApi(req, res, url)) return;
     if (await handleAdminApi(req, res, url)) return;
+    if (await handleSocialApi(req, res, url)) return;
 
     const generatedAssetMatch = url.pathname.match(/^\/api\/generated\/images\/[^/]+\.(?:svg|gif|png|webp|jpe?g)$/);
     const projectItemMatch = url.pathname.match(/^\/api\/projects\/[^/]+$/);
@@ -10520,6 +13963,16 @@ async function route(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/execute/shell") {
       await executeShell(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/computer/action") {
+      await executeComputerAction(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/network/fetch") {
+      await executeNetworkFetch(req, res);
       return;
     }
 

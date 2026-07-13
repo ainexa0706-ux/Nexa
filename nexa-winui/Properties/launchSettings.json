@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Nexa.WinUI (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Nexa.WinUI (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

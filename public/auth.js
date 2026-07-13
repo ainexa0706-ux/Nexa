@@ -89,6 +89,7 @@ async function startDesktopGoogleLogin(google) {
       const result = await api(`/api/auth/google/desktop/poll?state=${encodeURIComponent(started.state)}`);
       if (result.status === "pending") continue;
       if (result.status === "complete") {
+        if (result.desktopSessionToken) await window.nexaDesktop?.saveSession?.(result.desktopSessionToken);
         state.user = result.user || null;
         setStatus("Googleでログインしました。");
         await refresh();
@@ -184,6 +185,7 @@ $("#authForm")?.addEventListener("submit", async (event) => {
     };
     const path = state.tab === "login" ? "/api/auth/login" : "/api/auth/register";
     const result = await api(path, { method: "POST", body });
+    if (result.desktopSessionToken) await window.nexaDesktop?.saveSession?.(result.desktopSessionToken);
     state.user = result.user;
     if ($("#passwordInput")) $("#passwordInput").value = "";
     setStatus(result.firstUser ? "管理者アカウントを作成しました。" : "ログインしました。");
@@ -216,6 +218,7 @@ $("#logoutButton")?.addEventListener("click", async () => {
     // セッションがすでに切れていてもUIはログアウト扱いにする。
   }
   state.user = null;
+  await window.nexaDesktop?.clearSession?.();
   setStatus("ログアウトしました。もう一度Googleでログインできます。");
   await refresh();
 });
