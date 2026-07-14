@@ -125,6 +125,7 @@ const state = {
   liveAgents: [],
   socialOps: null,
   attachments: [],
+  changeCards: new Map(),
   busy: false,
   followLatestMessage: true,
   abortController: null,
@@ -1241,6 +1242,92 @@ function renderChoiceRequest(choiceRequest) {
   `;
 }
 
+function changeFilesFromProcessEvents(events = []) {
+  const summary = [...events].reverse().find((event) =>
+    event?.type === "edit" && Array.isArray(event?.data?.files) && event.data.files.length
+  );
+  if (!summary) return [];
+  const byPath = new Map();
+  for (const file of summary.data.files) {
+    if (!file?.path) continue;
+    byPath.set(file.path, file);
+  }
+  return [...byPath.values()];
+}
+
+function renderInlineChangeCard(message = {}) {
+  const changes = changeFilesFromProcessEvents(message.processEvents || []);
+  if (!changes.length) return "";
+
+  const cardId = `message-${message.id}`;
+  state.changeCards.set(cardId, changes);
+  const totals = changes.reduce((sum, file) => {
+    const stats = lineStats(file);
+    sum.additions += stats.additions;
+    sum.deletions += stats.deletions;
+    return sum;
+  }, { additions: 0, deletions: 0 });
+  const previewFile = changes[0];
+  const previewStats = lineStats(previewFile);
+
+  return `
+    <section class="changes-card changes-card--inline" data-change-card="${escapeHtml(cardId)}" aria-label="変更内容">
+      <div class="changes-card-head">
+        <span class="changes-icon" aria-hidden="true"></span>
+        <div>
+          <strong>変更を適用しました</strong>
+          <small>${changes.length} 件のファイルを変更 <b>+${totals.additions}</b>${totals.deletions ? ` <em>-${totals.deletions}</em>` : ""}</small>
+        </div>
+        <span class="changes-applied">適用済み</span>
+      </div>
+      <div class="changes-layout">
+        <div class="changes-files">
+          ${changes.slice(0, 8).map((file, index) => {
+            const stats = lineStats(file);
+            return `
+              <button class="changes-row ${index === 0 ? "is-selected" : ""}" type="button"
+                data-select-change-file="${escapeHtml(cardId)}" data-change-file-index="${index}">
+                <span>${escapeHtml(file.path)}</span>
+                <small>${file.status === "deleted" ? "削除" : `<b>+${escapeHtml(String(stats.additions))}</b>${stats.deletions ? ` <em>-${escapeHtml(String(stats.deletions))}</em>` : ""}`}</small>
+              </button>
+            `;
+          }).join("")}
+          ${changes.length > 8 ? `<span class="changes-file-overflow">+${changes.length - 8} 件</span>` : ""}
+        </div>
+        <div class="changes-preview">
+          <div class="preview-title" data-change-preview-title>${escapeHtml(previewFile.path)} <span>+${escapeHtml(String(previewStats.additions))}</span></div>
+          <pre class="diff-preview" data-change-preview><code>${renderDiffPreview(previewFile.diff)}</code></pre>
+        </div>
+      </div>
+      <div class="changes-actions">
+        <button type="button" data-review-changes data-change-card="${escapeHtml(cardId)}">すべての変更を確認</button>
+        <button class="primary" type="button" data-open-workspace-file="${escapeHtml(previewFile.path)}" data-change-open-file ${previewFile.status === "deleted" ? "disabled" : ""}>レビューする</button>
+        <span>選択フォルダーへ反映済み</span>
+      </div>
+    </section>
+  `;
+}
+
+function selectChangeCardFile(cardId = "", index = 0) {
+  const files = state.changeCards.get(cardId) || [];
+  const file = files[Number(index)];
+  const card = el.messageStream.querySelector(`[data-change-card="${CSS.escape(cardId)}"]`);
+  if (!file || !card) return;
+  const stats = lineStats(file);
+  card.querySelectorAll("[data-select-change-file]").forEach((row) => {
+    row.classList.toggle("is-selected", Number(row.dataset.changeFileIndex) === Number(index));
+  });
+  const title = card.querySelector("[data-change-preview-title]");
+  if (title) title.innerHTML = `${escapeHtml(file.path)} <span>+${escapeHtml(String(stats.additions))}</span>`;
+  const preview = card.querySelector("[data-change-preview]");
+  if (preview) preview.innerHTML = `<code>${renderDiffPreview(file.diff)}</code>`;
+  const review = card.querySelector("[data-change-open-file]");
+  if (review) {
+    review.dataset.openWorkspaceFile = file.path || "";
+    review.disabled = file.status === "deleted";
+  }
+}
+
 function resolvePendingChoiceRequest() {
   const messages = state.activeProject?.messages || [];
   const pending = [...messages].reverse().find((message) => message.role === "assistant" && message.choiceRequest);
@@ -1252,6 +1339,7 @@ function resolvePendingChoiceRequest() {
 
 function renderMessageExtras(message = {}) {
   return [
+    renderInlineChangeCard(message),
     message.artifacts?.length ? `<div class="message-artifacts">${renderArtifactCards(message.artifacts)}</div>` : "",
     message.choiceRequest ? renderChoiceRequest(message.choiceRequest) : "",
     message.attachments?.length ? `<div class="message-attachments">${attachmentChips(message.attachments, false)}</div>` : ""
@@ -2208,6 +2296,7 @@ function renderStartScreen() {
 function renderMessages() {
   el.messageStream.innerHTML = "";
   const messages = state.activeProject?.messages || [];
+  state.changeCards.clear();
   document.body.classList.toggle("has-empty-chat", messages.length === 0);
   document.body.classList.toggle("has-active-chat", messages.length > 0);
   if (!messages.length) {
@@ -2215,7 +2304,7 @@ function renderMessages() {
     return;
   }
   for (const message of messages) appendMessage(message, false);
-  appendChangeCard();
+  if (!messages.some((message) => changeFilesFromProcessEvents(message.processEvents || []).length)) appendChangeCard();
   scrollMessages(true);
 }
 
@@ -2996,6 +3085,12 @@ el.folderPanel.addEventListener("click", (event) => {
 });
 
 el.messageStream.addEventListener("click", (event) => {
+  const changeFile = event.target.closest("[data-select-change-file]");
+  if (changeFile) {
+    event.preventDefault();
+    selectChangeCardFile(changeFile.dataset.selectChangeFile || "", changeFile.dataset.changeFileIndex || "0");
+    return;
+  }
   const fileButton = event.target.closest("[data-open-workspace-file]");
   if (fileButton) {
     event.preventDefault();
@@ -3204,8 +3299,8 @@ el.accountKeyList?.addEventListener("click", (event) => {
   deleteAccountKey(button.dataset.deleteAccountKey);
 });
 
-function showChangesReviewStatus() {
-  const changes = latestChangeRun()?.changes || [];
+function showChangesReviewStatus(cardId = "") {
+  const changes = state.changeCards.get(cardId) || latestChangeRun()?.changes || [];
   setStatus(changes.length ? `${changes.length}件の変更を確認できます` : "まだ変更はありません");
   document.querySelector(".workspace-panel")?.classList.add("is-highlighted");
   setTimeout(() => document.querySelector(".workspace-panel")?.classList.remove("is-highlighted"), 900);
@@ -3231,7 +3326,7 @@ function cyclePerformanceChoice() {
 el.messageStream.addEventListener("click", async (event) => {
   const reviewButton = event.target.closest("[data-review-changes]");
   if (reviewButton) {
-    showChangesReviewStatus();
+    showChangesReviewStatus(reviewButton.dataset.changeCard || "");
     return;
   }
 
