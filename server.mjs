@@ -424,12 +424,14 @@ function applyProjectModeToRoute(project = null, route = {}, userText = "") {
       }
     };
   } else if (mode === "code") {
-    adjusted.needsCode = true;
-    adjusted.modeForcedCode = true;
-    adjusted.isComplex = true;
+    const statusQuestion = isWorkspaceStatusQuestion(userText);
+    adjusted.needsCode = !statusQuestion;
+    adjusted.modeForcedCode = !statusQuestion;
+    adjusted.isComplex = !statusQuestion;
     adjusted.intent = {
       ...adjusted.intent,
-      needsCode: true,
+      taskKind: statusQuestion ? "workspace_status" : adjusted.intent?.taskKind,
+      needsCode: !statusQuestion,
       needsWorkspaceContext: true,
       projectState: {
         ...(adjusted.intent?.projectState || {}),
@@ -1835,10 +1837,18 @@ function normalizeCodexState(project) {
   const allowedPermissions = new Set(["read-only", "workspace-write", "auto", "full-access", "danger-approval", "always-approval"]);
   const reviewComments = Array.isArray(codex.reviewComments) ? codex.reviewComments : [];
   const approvals = Array.isArray(codex.approvals) ? codex.approvals : [];
+  let goalText = String(goal.text || "").trim();
+  // Older builds could accidentally store a short continuation such as
+  // "make it usable" as the goal. Recover the last concrete request instead.
+  if (isWeakFinalObjective(goalText) && goal.source !== "manual") {
+    const recovered = latestExplicitImplementationRequest(project);
+    if (recovered) goalText = recovered;
+  }
   project.codex = {
     goal: {
-      text: String(goal.text || ""),
-      status: ["active", "paused", "done", "idle"].includes(goal.status) ? goal.status : (goal.text ? "active" : "idle"),
+      text: goalText,
+      status: ["active", "paused", "done", "idle"].includes(goal.status) ? goal.status : (goalText ? "active" : "idle"),
+      source: ["manual", "auto", "legacy"].includes(goal.source) ? goal.source : "legacy",
       updatedAt: String(goal.updatedAt || createdAt)
     },
     permissions: allowedPermissions.has(codex.permissions) ? codex.permissions : codexPermissionForAccess(project.accessLevel),
@@ -1878,6 +1888,27 @@ function finalObjectiveText(project = null) {
   return text && !blankMemoryText(text) ? clip(text, 4000) : "";
 }
 
+function isWorkspaceStatusQuestion(value = "") {
+  const text = String(value || "").replace(/\s+/g, "").trim();
+  if (!text || text.length > 72) return false;
+  return /(?:結局.*(?:作れた|できた|完成|動く)|(?:作れた|できた|完成|動く)(?:の|？|\?)?$|どこまで|進捗|状況|何ができ(?:た|てる)|確認して|見せて)/i.test(text) &&
+    !/(?:動くように|作って|作成して|実装して|直して|修正して|追加して|削除して)/i.test(text);
+}
+
+function isFinalObjectiveCandidate(value = "") {
+  const text = String(value || "").trim();
+  if (!text || isTerseContinuationRequest(text) || isWorkspaceStatusQuestion(text)) return false;
+  const hasOutcome = /(ゲーム|アプリ|サイト|ページ|LP|プロジェクト|システム|機能|画面|UI|コード|API|AI|モデル|3\s*D|three[- ]?dimensional|game|app|site|project|system|feature|interface)/i.test(text);
+  const hasAction = /(作って|作成|実装|構築|開発|書いて|生成|修正|改善|追加|build|create|make|implement|develop|write|generate|fix|improve|add)/i.test(text);
+  return hasOutcome && hasAction;
+}
+
+function isWeakFinalObjective(value = "") {
+  const text = String(value || "").replace(/\s+/g, "").trim();
+  if (!text || isFinalObjectiveCandidate(text)) return false;
+  return /^(?:実際に使える(?:ところ)?まで(?:もっていって|持っていって)|動くようにして|続き(?:やろう|を?やって|して)|もう一回(?:作って)?|もう一度(?:作って)?|それ(?:を)?やって|やり直して|作り直して)$/i.test(text);
+}
+
 function latestExplicitImplementationRequest(project = null) {
   const messages = [...(project?.messages || [])].reverse();
   const candidate = messages.find((message) => {
@@ -1892,20 +1923,27 @@ function latestExplicitImplementationRequest(project = null) {
 
 function ensureFinalObjective(project, submittedText = "", decision = null) {
   const codex = normalizeCodexState(project);
-  if (codex.goal.text) return codex.goal.text;
+  const historical = latestExplicitImplementationRequest(project);
+  if (codex.goal.text && (!isWeakFinalObjective(codex.goal.text) || codex.goal.source === "manual")) return codex.goal.text;
+  if (codex.goal.text && isWeakFinalObjective(codex.goal.text) && codex.goal.source !== "manual" && historical) {
+    codex.goal = { text: historical, status: "active", source: "auto", updatedAt: now() };
+    project.goal = historical;
+    return historical;
+  }
   const codeActions = new Set(["create", "modify", "debug", "continue", "computer", "command"]);
   const isCodeWork = decision
     ? Boolean(decision.needsCode || codeActions.has(decision.action))
     : normalizeChatMode(project?.mode) !== "chat";
   if (!isCodeWork) return "";
-  const explicitLooksLikeImplementation = /(作って|作成|実装|ゲーム|アプリ|サイト|LP|コード|修正|変更|追加|削除|build|create|implement|fix)/i.test(submittedText);
-  const explicit = !isTerseContinuationRequest(submittedText) && (decision || explicitLooksLikeImplementation)
+  const explicit = isFinalObjectiveCandidate(submittedText)
     ? executableRequestFromSafetyPrompt(submittedText)
     : "";
-  const historical = latestExplicitImplementationRequest(project);
-  const text = clip(explicit || historical || decision?.resolvedRequest || "", 4000);
+  // A semantic decision may recognize a continuation, but it must never turn
+  // that continuation sentence into the project goal.
+  const text = clip(historical || explicit || "", 4000);
   if (!text) return "";
-  codex.goal = { text, status: "active", updatedAt: now() };
+  codex.goal = { text, status: "active", source: "auto", updatedAt: now() };
+  project.goal = text;
   return text;
 }
 
@@ -3262,6 +3300,7 @@ function updateCodexConfig(project, patch = {}) {
       ? patch.goal.status
       : (text ? codex.goal.status : "idle");
     codex.goal = { text, status: text ? status : "idle", updatedAt: now() };
+    codex.goal.source = "manual";
   }
   if (patch.permissions) {
     const allowed = new Set(["read-only", "workspace-write", "auto", "full-access", "danger-approval", "always-approval"]);
@@ -8042,6 +8081,44 @@ function folderOverviewDirectReply(project, autoContext = [], userText = "") {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function workspaceStatusDirectReply(project, autoContext = [], userText = "") {
+  if (!project?.workspaceReady || !isWorkspaceStatusQuestion(userText)) return "";
+
+  const overview = autoContext.find((item) => item.name === "selected-folder-overview" && item.text);
+  const folderName = project.selectedFolderName || folderNameFromWorkspace(project.workspaceRoot || "") || project.name || "workspace";
+  const workspaceRoot = project.workspaceRoot || project.selectedFolderPath || "";
+  const text = String(overview?.text || "");
+  const empty = /No visible files or folders/i.test(text);
+  const latestRun = [...(project.runs || [])].reverse().find((run) => run?.type === "multi-agent-chat");
+  const latestQuality = latestRun?.quality;
+
+  if (!overview) {
+    return [
+      "現在の作業状態を確認しています。",
+      `作業フォルダー: ${folderName}`,
+      workspaceRoot ? `場所: ${workspaceRoot}` : "",
+      "ファイル一覧を取得できなかったため、完了とは断定しません。もう一度、構成と起動確認を行う必要があります。"
+    ].filter(Boolean).join("\n");
+  }
+
+  if (empty) {
+    return [
+      "まだ完成していません。",
+      `作業フォルダー「${folderName}」は現在空です。`,
+      workspaceRoot ? `場所: ${workspaceRoot}` : "",
+      "実装ファイルと起動確認の結果がないため、作成成功とは扱いません。"
+    ].filter(Boolean).join("\n");
+  }
+
+  return [
+    "作業ファイルは確認できましたが、完成・動作済みとはまだ断定しません。",
+    `作業フォルダー: ${folderName}`,
+    workspaceRoot ? `場所: ${workspaceRoot}` : "",
+    latestQuality ? `直近の応答品質: ${latestQuality.score || "-"}/100 (${latestQuality.grade || "-"})` : "",
+    "次は起動またはビルドを実行し、エラーがないことを確認してから完成と判断します。"
+  ].filter(Boolean).join("\n");
 }
 
 const baseRouteCompanyWork = routeCompanyWork;
@@ -13058,7 +13135,11 @@ async function companyChatStream(req, res) {
         userText = `${pendingPlan.executableRequest}\n直前に提示した安全な代替案に沿って進め、破壊的変更の前に最終確認を取って。`;
       }
     }
-    if (!resumedSafetyPlan) {
+    // A status question in code mode is read-only. It must not be rewritten
+    // into an implementation request or accidentally start another code run.
+    const workspaceStatusQuestion = normalizeChatMode(project.mode) === "code" &&
+      isWorkspaceStatusQuestion(submittedText);
+    if (!resumedSafetyPlan && !workspaceStatusQuestion) {
       semanticIntentDecision = await resolveTurnIntentWithAi(project, submittedText, system);
       if (semanticIntentDecision?.confidence >= 0.62 && semanticIntentDecision.resolvedRequest) {
         ensureFinalObjective(project, submittedText, semanticIntentDecision);
@@ -13119,7 +13200,7 @@ async function companyChatStream(req, res) {
         needsComputer: semanticIntentDecision.needsComputer
       };
     }
-    route = applyProjectModeToRoute(project, route, userText);
+    route = applyProjectModeToRoute(project, route, submittedText);
     if (isNonExecutingSafetyRequest(userText)) {
       route.needsCode = false;
       route.safetyPlanOnly = true;
@@ -13182,7 +13263,7 @@ async function companyChatStream(req, res) {
       res.end();
       return;
     }
-    const startEvent = processEvent("thinking", "依頼を受け取る", clip(userText, 180));
+    const startEvent = processEvent("thinking", "依頼を受け取る", clip(submittedText, 180));
     assistantMessage.processEvents.push(startEvent);
     send("process", { messageId: assistantMessage.id, event: startEvent });
     if (safetyDecision) {
@@ -13381,6 +13462,7 @@ async function companyChatStream(req, res) {
     try {
       const codeCapabilityReply = workspaceCodeCapabilityDirectReply(project, userText);
       const folderReply = route.needsCode ? "" : folderOverviewDirectReply(project, autoContext, userText);
+      const workspaceStatusReply = route.needsCode ? "" : workspaceStatusDirectReply(project, autoContext, submittedText);
       const directIntro = assistantSelfIntroductionReply(userText);
       const chatCapabilityReply = assistantChatCapabilityReply(userText, route.mode);
       const nexaStrengthsReply = assistantNexaStrengthsReply(userText, route.mode);
@@ -13415,6 +13497,9 @@ async function companyChatStream(req, res) {
       } else if (folderReply) {
         assistantMessage.content = folderReply;
         send("assistant-delta", { id: assistantMessage.id, delta: folderReply });
+      } else if (workspaceStatusReply) {
+        assistantMessage.content = workspaceStatusReply;
+        send("assistant-delta", { id: assistantMessage.id, delta: workspaceStatusReply });
       } else if (directIntro) {
         assistantMessage.content = directIntro;
         send("assistant-delta", { id: assistantMessage.id, delta: directIntro });
@@ -15183,6 +15268,7 @@ async function route(req, res) {
           codex.goal = {
             text,
             status: text ? "active" : "idle",
+            source: "manual",
             updatedAt: now()
           };
           project.goal = text;

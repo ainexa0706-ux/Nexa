@@ -18,7 +18,10 @@ export function createNexaPipeline({
   if (!isChat) {
     tools.push("memory");
     if (attachmentCount > 0) tools.push("rag");
-    if (route.needsCode && workspaceReady) tools.push("file-system");
+    // Code-mode status checks may inspect the selected workspace, but they
+    // never need the write/terminal execution path.
+    const needsWorkspaceRead = route.needsCode || intent?.taskKind === "workspace_status";
+    if (needsWorkspaceRead && workspaceReady) tools.push("file-system");
     if (route.needsCode && workspaceReady && accessLevel === "full") tools.push("terminal");
     if (route.needsResearch) tools.push("web-search");
     if (intent?.taskKind === "math") tools.push("calculator");
