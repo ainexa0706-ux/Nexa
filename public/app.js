@@ -1198,23 +1198,51 @@ function renderProcessLogRow(event = {}) {
   `;
 }
 
-function renderProcessEvents(events = []) {
+function isBroadcastWorthyProcessEvent(event = {}) {
+  const title = String(event.title || "").trim();
+  const detail = String(event.detail || "").trim();
+  if (event.type === "edit" || event.type === "command" || event.type === "error" || event.type === "done") return true;
+
+  // Keep the feed about observable work. The hidden planning telemetry is
+  // still persisted with the run, but it should not drown out the actions the
+  // user can actually follow in real time.
+  if (/^(?:依頼を受け取る|意図判断AIが処理方針を決定|作業を開始|作業フォルダー(?:を確認|を調査)?|既存ファイルを確認|実装ファイルを設計|保存前にファイル候補を確認|不足している実装を検出|失敗したファイルだけを修正|差分を確認|コマンド(?:を実行|が完了|で問題を検出)|最後の確認が完了|品質確認)$/.test(title)) return true;
+  if (/\.[A-Za-z0-9_-]{1,12}\s*を(?:確認|新規作成|編集|削除)しました$/.test(title)) return true;
+  return /(?:\.\w{1,8}\b|npm\s|pnpm\s|yarn\s|bytes|変更行|エラー|失敗|確認)/i.test(detail);
+}
+
+function renderProcessEvents(events = [], { live = false } = {}) {
   // Chat mode is a clean conversation surface. Development telemetry remains
   // available in code/both mode, but never competes with a normal reply.
   if (projectMode() === "chat") return "";
-  if (!events.length) return "";
-  const latestEdit = [...events].reverse().find((event) => event.type === "edit" && event.data?.stats);
+  const visibleEvents = events.filter(isBroadcastWorthyProcessEvent);
+  if (!visibleEvents.length) return "";
+  const current = visibleEvents[visibleEvents.length - 1];
+  const latestEdit = [...visibleEvents].reverse().find((event) => event.type === "edit" && event.data?.stats);
   const stats = latestEdit?.data?.stats;
   return `
-    <div class="process-card" aria-label="開発ログ">
-      ${events.map(renderProcessLogRow).join("")}
-      ${stats ? `
-        <div class="process-toast">
-          <span>${escapeHtml(String(stats.count))}個のファイルが変更されました</span>
-          <b>+${escapeHtml(String(stats.changedLines || 0))}</b>
+    <section class="process-broadcast ${live ? "is-live" : ""}" aria-label="Nexaの作業状況">
+      <div class="process-now">
+        <span class="process-live-dot" aria-hidden="true"></span>
+        <div>
+          <small>${live ? "Nexaが実行中" : "Nexaの作業記録"}</small>
+          <strong>${escapeHtml(processEventLabel(current))}</strong>
+          ${current.detail ? `<span>${escapeHtml(clipPlain(current.detail, 150))}</span>` : ""}
         </div>
-      ` : ""}
-    </div>
+      </div>
+      <details class="process-card" ${live ? "open" : ""}>
+        <summary>${live ? "いま行っている作業と履歴" : `作業履歴を表示 (${visibleEvents.length})`}</summary>
+        <div class="process-feed">
+          ${visibleEvents.map(renderProcessLogRow).join("")}
+          ${stats ? `
+            <div class="process-toast">
+              <span>${escapeHtml(String(stats.count))}個のファイルが変更されました</span>
+              <b>+${escapeHtml(String(stats.changedLines || 0))}</b>
+            </div>
+          ` : ""}
+        </div>
+      </details>
+    </section>
   `;
 }
 
@@ -2367,7 +2395,7 @@ function appendMessage(message, scroll = true) {
       <small>${timeLabel(message.createdAt || new Date())}</small>
     </div>
     <div class="message-live-slot">${renderLiveIntro(message)}</div>
-    <div class="message-process">${message.role === "assistant" ? renderProcessEvents(message.processEvents || []) : ""}</div>
+    <div class="message-process">${message.role === "assistant" ? renderProcessEvents(message.processEvents || [], { live: Boolean(message.streaming) }) : ""}</div>
     <div class="message-reasoning">${renderReasoningSummary(message)}</div>
     <div class="message-body ${visibleContent ? "" : "is-empty"}">${renderMarkdown(visibleContent)}</div>
     <div class="message-extra">${renderMessageExtras(message)}</div>
@@ -2385,7 +2413,7 @@ function updateMessage(messageId, content, message = null) {
   const live = article.querySelector(".message-live-slot");
   if (live) live.innerHTML = renderLiveIntro(renderTarget);
   const process = article.querySelector(".message-process");
-  if (process) process.innerHTML = renderTarget.role === "assistant" ? renderProcessEvents(renderTarget.processEvents || []) : "";
+  if (process) process.innerHTML = renderTarget.role === "assistant" ? renderProcessEvents(renderTarget.processEvents || [], { live: Boolean(renderTarget.streaming) }) : "";
   const reasoning = article.querySelector(".message-reasoning");
   if (reasoning) reasoning.innerHTML = renderReasoningSummary(renderTarget);
   const body = article.querySelector(".message-body");

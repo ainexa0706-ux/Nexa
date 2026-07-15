@@ -11398,6 +11398,7 @@ function parseStructuredCodeAgentAction(value = "") {
 function structuredCodeAgentSystemPrompt() {
   return [
     "You are Nexa's autonomous workspace coding agent. Work like a tool-using coding assistant, not a chat code generator.",
+    "You inherit the same conversation understanding as Nexa's chat mode. Read the final objective, primary request, recent project context, and the current workspace before deciding the next action.",
     "Return exactly one JSON object and perform exactly one next action per turn. Never return markdown, file fences, diffs, prose, or hidden reasoning.",
     "Actions:",
     '{"action":"list_files","reason":"why"}',
@@ -11553,8 +11554,8 @@ async function runStructuredWorkspaceCodeAgent(project, route, model, userText, 
 
   emitProcessEvent(options, processEvent(
     "thinking",
-    "コードエージェントを開始",
-    "Nexaが作業フォルダーを確認し、読み取り・編集・コマンド・検証を1操作ずつ進めます。"
+    "作業を開始",
+    "まず選択フォルダーの構成を確認し、目的に必要な変更だけを順番に進めます。"
   ));
   if (requiredFiles.length) {
     emitProcessEvent(options, processEvent("thinking", "実装ファイルを設計", `${requiredFiles.length}件を完了条件として順番に実装します。`, { files: implementationPlan.files }));
@@ -12407,7 +12408,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     ? { ...route, ...options.pipeline.route, intent }
     : applyProjectModeToRoute(project, route, userText);
   intent = route.intent || intent;
-  const selectedModel = resolveRequestedModel(system, options.modelChoice, route.needsCode ? "code" : "conversation");
+  // Code mode must not lose the conversational model's intent recovery just
+  // because it later uses structured workspace tools.  Pick the same primary
+  // intelligence model for both modes; the tool protocol is the difference,
+  // not the level of understanding.
+  const selectedModel = resolveRequestedModel(system, options.modelChoice, "conversation") ||
+    resolveRequestedModel(system, options.modelChoice, route.needsCode ? "code" : "conversation");
   const localFastModel = localFallbackForKind(system, "fast");
   const localSmartModel = localFallbackForKind(system, "conversation");
   const localCodeModel = localFallbackForKind(system, "code");
@@ -12417,10 +12423,10 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     : (system.plan.conversation || system.plan.fast || selectedModel);
   const codeModel = options.modelChoice && options.modelChoice !== "auto"
     ? selectedModel
-    : (system.plan.code || smartModel || fastModel);
-  const responseModel = route.needsCode ? (codeModel || smartModel || fastModel) : (smartModel || fastModel);
+    : (smartModel || system.plan.code || fastModel);
+  const responseModel = smartModel || codeModel || fastModel;
   const responseFallbackModel = route.needsCode
-    ? (localCodeModel || localSmartModel || localFastModel)
+    ? (localSmartModel || localCodeModel || localFastModel)
     : (localSmartModel || localFastModel || localCodeModel);
   const deepProfile = deepReasoningProfile(userText, route, options);
   const workspaceSelection = project.workspaceReady
@@ -12440,6 +12446,12 @@ async function runCompanyAgents(project, userText, history, system, send, attach
     options.pipeline ? `Nexa 3.0 execution plan:\n${JSON.stringify(pipelineSummary(options.pipeline), null, 2)}` : "",
     `Deep reasoning profile:\n${JSON.stringify(deepProfile, null, 2)}`,
     `User request:\n${userText}`,
+    route.needsCode ? [
+      "Code execution contract:",
+      "Use the same full conversation understanding, final objective, recent messages, and project memory as a normal chat reply before choosing a workspace action.",
+      "Translate that understanding into real read/write/command operations one at a time. Do not simplify the request into a generic starter or a fixed template.",
+      "Every visible progress update must state the concrete file, command, issue, or verification currently being handled."
+    ].join("\n") : "",
     `Media policy:\n${IMAGE_GENERATION_ONLY ? "Image generation only. Video generation is intentionally disabled; never claim a video was created." : "Image and video generation may be available."}`,
     `Selected workspace folder:\n${workspaceSelection}`,
     `Workspace write scope:\n${project.workspaceReady ? (CODEX_STYLE_CODE_AGENT ? "Write only inside the selected folder through structured workspace tools. Inspect existing files before editing and verify the result." : "Write only inside the selected folder. Prefer direct file blocks for new files and valid diffs for edits.") : "No selected folder; do not claim files were written."}`,

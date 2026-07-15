@@ -4398,16 +4398,128 @@ body.has-active-chat .message-stream {
   animation: process-enter 0.18s ease both;
 }
 
+.process-broadcast {
+  width: min(600px, 100%);
+  display: grid;
+  gap: 8px;
+  margin: 2px 0 14px;
+}
+
+.process-now {
+  min-height: 54px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.process-broadcast.is-live .process-now {
+  border-color: rgba(80, 143, 255, 0.35);
+  background: rgba(61, 110, 255, 0.08);
+}
+
+.process-live-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #7c808a;
+  box-shadow: 0 0 0 3px rgba(124, 128, 138, 0.13);
+}
+
+.process-broadcast.is-live .process-live-dot {
+  background: #4c91ff;
+  box-shadow: 0 0 0 3px rgba(76, 145, 255, 0.18), 0 0 16px rgba(76, 145, 255, 0.65);
+  animation: livePulse 1.2s ease-in-out infinite;
+}
+
+.process-now > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.process-now small {
+  color: #8f939c;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.process-now strong {
+  overflow: hidden;
+  color: #f0f2f7;
+  font-size: 13px;
+  font-weight: 690;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-now span:not(.process-live-dot) {
+  overflow: hidden;
+  color: #a7aab2;
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .process-card {
   position: relative;
   width: min(560px, 100%);
-  display: grid;
-  gap: 7px;
-  padding: 2px 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.018);
 }
 
 .process-card::before {
   display: none;
+}
+
+.process-card summary {
+  min-height: 34px;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  color: #9b9ea7;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 630;
+  list-style: none;
+  user-select: none;
+}
+
+.process-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.process-card summary::after {
+  content: "+";
+  margin-left: auto;
+  color: #7f8490;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.process-card[open] summary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.process-card[open] summary::after {
+  content: "-";
+}
+
+.process-feed {
+  max-height: 290px;
+  padding: 9px 11px 11px;
+  display: grid;
+  gap: 7px;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 
 .process-row {
